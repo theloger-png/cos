@@ -51,7 +51,7 @@ fi
 
 echo "[1/N] Installing common system packages..."
 apt-get update -q
-apt-get install -y -q python3.12 python3.12-venv python3.12-dev git curl wget
+apt-get install -y -q python3.12 python3.12-venv python3.12-dev git curl wget pkg-config libvirt-dev
 
 echo "[2/N] Creating cos group and user..."
 if ! getent group cos > /dev/null 2>&1; then
@@ -64,6 +64,11 @@ if ! id cos > /dev/null 2>&1; then
             --no-create-home \
             --shell /usr/sbin/nologin \
             cos
+fi
+
+SUDO_USER=${SUDO_USER:-$USER}
+if [ -n "$SUDO_USER" ] && [ "$SUDO_USER" != "root" ]; then
+    usermod -aG cos "$SUDO_USER"
 fi
 
 echo "[3/N] Creating directories..."
@@ -106,7 +111,7 @@ if [[ "$ROLE" == "controller" ]]; then
     if [[ ! -f /opt/cos/admin_api_key ]]; then
         python3.12 -c "import secrets; print(secrets.token_hex(32))" > /opt/cos/admin_api_key
         chown cos:cos /opt/cos/admin_api_key
-        chmod 600 /opt/cos/admin_api_key
+        chmod 640 /opt/cos/admin_api_key
     else
         echo "       admin_api_key already exists, skipping."
     fi

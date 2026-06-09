@@ -1,0 +1,5 @@
+Metadata-Version: 2.4
+Name: cos
+Version: 0.1.0
+Summary: COS - Cloud Operating System
+Requires-Python: >=3.12
