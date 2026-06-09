@@ -42,7 +42,7 @@ def _net_to_info(n: Network) -> NetworkInfo:
 @router.get("", response_model=list[NetworkInfo])
 async def list_networks(
     session: AsyncSession = Depends(db_session),
-    auth: tuple[APIKey, Tenant | None] = Depends(current_auth),
+    auth: tuple[APIKey | None, Tenant | None] = Depends(current_auth),
 ) -> list[NetworkInfo]:
     """List all networks owned by the authenticated tenant, or all networks if admin."""
     _, tenant = auth

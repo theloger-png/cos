@@ -42,7 +42,7 @@ def _tpl_to_schema(t: VMTemplate) -> VMTemplateSchema:
 @router.get("", response_model=list[VMTemplateSchema])
 async def list_templates(
     session: AsyncSession = Depends(db_session),
-    auth: tuple[APIKey, Tenant | None] = Depends(current_auth),
+    auth: tuple[APIKey | None, Tenant | None] = Depends(current_auth),
 ) -> list[VMTemplateSchema]:
     """List all available VM templates."""
     result = await session.execute(select(VMTemplate))
@@ -53,7 +53,7 @@ async def list_templates(
 async def create_template(
     body: TemplateCreate,
     session: AsyncSession = Depends(db_session),
-    auth: tuple[APIKey, Tenant | None] = Depends(current_auth),
+    auth: tuple[APIKey | None, Tenant | None] = Depends(current_auth),
 ) -> VMTemplateSchema:
     """Create a new VM template."""
     tpl = VMTemplate(
@@ -75,7 +75,7 @@ async def create_template(
 async def delete_template(
     template_id: uuid.UUID,
     session: AsyncSession = Depends(db_session),
-    auth: tuple[APIKey, Tenant | None] = Depends(current_auth),
+    auth: tuple[APIKey | None, Tenant | None] = Depends(current_auth),
 ) -> None:
     """Delete a VM template."""
     result = await session.execute(select(VMTemplate).where(VMTemplate.id == template_id))

@@ -45,7 +45,7 @@ def _tenant_to_info(t: Tenant) -> TenantInfo:
 @router.get("", response_model=list[TenantInfo])
 async def list_tenants(
     session: AsyncSession = Depends(db_session),
-    auth: tuple[APIKey, Tenant | None] = Depends(current_auth),
+    auth: tuple[APIKey | None, Tenant | None] = Depends(current_auth),
 ) -> list[TenantInfo]:
     """List all tenants. Admin access required."""
     require_admin(auth)
@@ -57,7 +57,7 @@ async def list_tenants(
 async def create_tenant(
     body: TenantCreate,
     session: AsyncSession = Depends(db_session),
-    auth: tuple[APIKey, Tenant | None] = Depends(current_auth),
+    auth: tuple[APIKey | None, Tenant | None] = Depends(current_auth),
 ) -> TenantInfo:
     """Create a new tenant. Admin access required."""
     require_admin(auth)
@@ -72,7 +72,7 @@ async def create_tenant(
 async def delete_tenant(
     tenant_id: uuid.UUID,
     session: AsyncSession = Depends(db_session),
-    auth: tuple[APIKey, Tenant | None] = Depends(current_auth),
+    auth: tuple[APIKey | None, Tenant | None] = Depends(current_auth),
 ) -> None:
     """Delete a tenant and all associated resources. Admin access required."""
     require_admin(auth)
@@ -89,7 +89,7 @@ async def create_api_key(
     tenant_id: uuid.UUID,
     body: APIKeyCreate,
     session: AsyncSession = Depends(db_session),
-    auth: tuple[APIKey, Tenant | None] = Depends(current_auth),
+    auth: tuple[APIKey | None, Tenant | None] = Depends(current_auth),
 ) -> APIKeyResponse:
     """Generate a new API key for the given tenant. Admin access required."""
     require_admin(auth)
