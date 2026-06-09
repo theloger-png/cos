@@ -25,7 +25,7 @@ class AgentSettings(BaseSettings):
                 self,
                 "node_id",
                 load_or_create_secret(
-                    "/opt/cos-agent/node_id",
+                    "/opt/cos/node_id",
                     generator=lambda: str(uuid.uuid4()),
                     gen_args=(),
                 ),

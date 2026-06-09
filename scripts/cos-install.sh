@@ -161,7 +161,7 @@ fi
 if [[ "$ROLE" == "agent" ]]; then
 
     echo "[A1] Installing KVM/libvirt packages..."
-    apt-get install -y -q qemu-kvm libvirt-daemon-system libvirt-clients virtinst python3-libvirt
+    apt-get install -y -q qemu-kvm libvirt-daemon-system libvirt-clients python3-libvirt
 
     echo "[A2] Adding cos user to libvirt group..."
     usermod -aG libvirt cos
