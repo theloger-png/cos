@@ -178,16 +178,16 @@ WantedBy=multi-user.target
 EOF
 
     echo "[C8] Enabling and starting cos-controller..."
+    rm -f /opt/cos/admin_password
     systemctl daemon-reload
     systemctl enable cos-controller
     systemctl restart cos-controller
+    sleep 3
 
     echo ""
     echo "COS Controller installed."
     echo "  Admin API key:  $(cat /opt/cos/admin_api_key)"
-    if [[ -f /opt/cos/admin_password ]]; then
-        echo "  Admin password: $(cat /opt/cos/admin_password)"
-    fi
+    echo "  Admin password: $(cat /opt/cos/admin_password)"
     echo "COS Portal available at http://$(hostname -I | awk '{print $1}')"
 
 fi

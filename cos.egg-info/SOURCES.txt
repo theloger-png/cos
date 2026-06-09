@@ -17,8 +17,10 @@ controller/agent_client/client.py
 controller/api/__init__.py
 controller/api/app.py
 controller/api/auth.py
+controller/api/auth_users.py
 controller/api/deps.py
 controller/api/routers/__init__.py
+controller/api/routers/auth.py
 controller/api/routers/networks.py
 controller/api/routers/nodes.py
 controller/api/routers/templates.py
