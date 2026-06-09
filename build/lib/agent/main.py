@@ -38,10 +38,9 @@ def _local_ip() -> str:
 
 
 async def _register_node(client: httpx.AsyncClient) -> None:
-    """Register this node with the controller if not already registered."""
+    """Register this node with the controller and persist the assigned node_id."""
     stats = _libvirt.get_node_stats()
     payload = {
-        "id": settings.node_id,
         "hostname": _local_hostname(),
         "ip_address": _local_ip(),
         "cpu_total": len(__import__("psutil").cpu_percent(percpu=True)),
@@ -56,8 +55,16 @@ async def _register_node(client: httpx.AsyncClient) -> None:
             headers={"X-API-Key": settings.controller_api_key},
             timeout=10,
         )
-        if resp.status_code in (200, 201, 409):
-            logger.info("Node registered with controller (status %d)", resp.status_code)
+        if resp.status_code in (200, 201):
+            node_id = resp.json()["id"]
+            node_id_path = "/opt/cos/node_id"
+            with open(node_id_path, "w") as f:
+                f.write(node_id)
+            logger.info(
+                "Node registered with controller (status %d), node_id=%s",
+                resp.status_code,
+                node_id,
+            )
         else:
             logger.warning("Node registration returned status %d", resp.status_code)
     except Exception as exc:
