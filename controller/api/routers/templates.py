@@ -35,6 +35,7 @@ def _tpl_to_schema(t: VMTemplate) -> VMTemplateSchema:
         disk_gb=t.disk_gb,
         os_type=t.os_type,
         image_path=t.image_path,
+        created_at=t.created_at,
     )
 
 

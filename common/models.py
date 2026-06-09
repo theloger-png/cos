@@ -69,6 +69,7 @@ class VMTemplate(BaseModel):
     disk_gb: int
     os_type: str
     image_path: str
+    created_at: datetime
 
 
 class NetworkInfo(BaseModel):
@@ -78,6 +79,7 @@ class NetworkInfo(BaseModel):
     vlan_id: int
     cidr: str
     gateway: str
+    created_at: datetime
 
 
 class HeartbeatPayload(BaseModel):
