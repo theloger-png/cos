@@ -11,7 +11,6 @@ import uvicorn
 from controller.api.app import create_app
 from controller.api.auth import ensure_admin_key
 from controller.config import settings
-from controller.db.base import Base
 from controller.db.models import Node
 from controller.db.session import AsyncSessionLocal, engine
 from fastapi import FastAPI
@@ -39,9 +38,6 @@ async def _heartbeat_monitor() -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-
     async with AsyncSessionLocal() as session:
         await ensure_admin_key(session)
 

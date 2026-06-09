@@ -104,10 +104,14 @@ if [[ "$ROLE" == "controller" ]]; then
     su -c "psql -tc \"SELECT 1 FROM pg_database WHERE datname='cos'\" | grep -q 1 || \
            psql -c \"CREATE DATABASE cos OWNER cos\"" postgres
 
-    echo "[C4] Creating controller config directory..."
+    echo "[C4] Running database migrations..."
+    COS_DATABASE_URL=postgresql+asyncpg://cos:cos@localhost/cos \
+        /opt/cos/venv/bin/alembic --config /home/super/dev/cos/alembic.ini upgrade head
+
+    echo "[C5] Creating controller config directory..."
     install -d -o cos -g cos -m 750 /opt/cos/config
 
-    echo "[C5] Generating admin API key..."
+    echo "[C6] Generating admin API key..."
     if [[ ! -f /opt/cos/admin_api_key ]]; then
         python3.12 -c "import secrets; print(secrets.token_hex(32))" > /opt/cos/admin_api_key
         chown cos:cos /opt/cos/admin_api_key
@@ -116,7 +120,7 @@ if [[ "$ROLE" == "controller" ]]; then
         echo "       admin_api_key already exists, skipping."
     fi
 
-    echo "[C6] Writing cos-controller systemd service..."
+    echo "[C7] Writing cos-controller systemd service..."
     cat > /etc/systemd/system/cos-controller.service <<'EOF'
 [Unit]
 Description=COS Controller
@@ -140,7 +144,7 @@ RuntimeDirectoryMode=0750
 WantedBy=multi-user.target
 EOF
 
-    echo "[C7] Enabling and starting cos-controller..."
+    echo "[C8] Enabling and starting cos-controller..."
     systemctl daemon-reload
     systemctl enable cos-controller
     systemctl restart cos-controller
