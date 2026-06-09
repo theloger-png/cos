@@ -44,7 +44,7 @@ async def ensure_admin_key(session: AsyncSession) -> None:
         key_hash = hash_api_key(raw_key)
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(raw_key)
-        os.chmod(ADMIN_KEY_PATH, 0o600)
+        os.chmod(ADMIN_KEY_PATH, 0o640)
         logger.info("Admin API key written to %s", ADMIN_KEY_PATH)
 
     admin_key = APIKey(
