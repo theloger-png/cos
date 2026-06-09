@@ -120,6 +120,37 @@ if [[ "$ROLE" == "controller" ]]; then
         echo "       admin_api_key already exists, skipping."
     fi
 
+    echo "[C-PORTAL] Installing Node.js 20 and nginx..."
+    NODE_OK=false
+    if command -v node &>/dev/null; then
+        NODE_VER=$(node --version | sed 's/v//' | cut -d. -f1)
+        [[ "$NODE_VER" -ge 20 ]] && NODE_OK=true
+    fi
+    if [[ "$NODE_OK" == false ]]; then
+        curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
+        apt-get install -y nodejs
+    fi
+    apt-get install -y nginx
+
+    echo "[C-PORTAL] Building portal..."
+    SERVER_IP=$(hostname -I | awk '{print $1}')
+    cd /home/super/dev/cos/portal
+    printf 'VITE_API_URL=http://%s:8090\n' "$SERVER_IP" > .env.production
+    printf 'VITE_API_KEY=%s\n' "$(cat /opt/cos/admin_api_key)" >> .env.production
+    npm install --legacy-peer-deps
+    npm run build
+    rm -rf /opt/cos/portal
+    cp -r dist/ /opt/cos/portal
+    chown -R cos:cos /opt/cos/portal
+
+    echo "[C-PORTAL] Installing nginx config..."
+    cp /home/super/dev/cos/nginx/cos-portal.conf /etc/nginx/sites-available/cos-portal
+    sed -i "s|root /opt/cos/portal;|root /opt/cos/portal;|" /etc/nginx/sites-available/cos-portal
+    sed -i "s|proxy_pass http://127.0.0.1:8090;|proxy_pass http://${SERVER_IP}:8090;|" /etc/nginx/sites-available/cos-portal
+    ln -sf /etc/nginx/sites-available/cos-portal /etc/nginx/sites-enabled/cos-portal
+    rm -f /etc/nginx/sites-enabled/default
+    nginx -t && systemctl enable nginx && systemctl restart nginx
+
     echo "[C7] Writing cos-controller systemd service..."
     cat > /etc/systemd/system/cos-controller.service <<'EOF'
 [Unit]
@@ -151,6 +182,7 @@ EOF
 
     echo ""
     echo "COS Controller installed. API key: $(cat /opt/cos/admin_api_key)"
+    echo "COS Portal available at http://$(hostname -I | awk '{print $1}')"
 
 fi
 
