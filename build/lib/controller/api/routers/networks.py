@@ -35,6 +35,7 @@ def _net_to_info(n: Network) -> NetworkInfo:
         vlan_id=n.vlan_id,
         cidr=n.cidr,
         gateway=n.gateway,
+        created_at=n.created_at,
     )
 
 

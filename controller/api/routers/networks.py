@@ -6,8 +6,8 @@ import logging
 import uuid
 
 from common.models import NetworkInfo
-from controller.api.deps import current_tenant, db_session
-from controller.db.models import Network, Tenant
+from controller.api.deps import current_auth, current_tenant, db_session
+from controller.db.models import APIKey, Network, Tenant
 from controller.nos_client.client import NOSClient
 from controller.config import settings
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -42,10 +42,14 @@ def _net_to_info(n: Network) -> NetworkInfo:
 @router.get("", response_model=list[NetworkInfo])
 async def list_networks(
     session: AsyncSession = Depends(db_session),
-    tenant: Tenant = Depends(current_tenant),
+    auth: tuple[APIKey, Tenant | None] = Depends(current_auth),
 ) -> list[NetworkInfo]:
-    """List all networks owned by the authenticated tenant."""
-    result = await session.execute(select(Network).where(Network.tenant_id == tenant.id))
+    """List all networks owned by the authenticated tenant, or all networks if admin."""
+    _, tenant = auth
+    if tenant is None:
+        result = await session.execute(select(Network))
+    else:
+        result = await session.execute(select(Network).where(Network.tenant_id == tenant.id))
     return [_net_to_info(n) for n in result.scalars().all()]
 
 
