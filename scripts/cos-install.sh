@@ -138,10 +138,13 @@ if [[ "$ROLE" == "controller" ]]; then
     printf 'VITE_API_URL=http://%s:8090\n' "$SERVER_IP" > .env.production
     printf 'VITE_API_KEY=%s\n' "$(cat /opt/cos/admin_api_key)" >> .env.production
     npm install --legacy-peer-deps
+    npm install react-is --legacy-peer-deps
     npm run build
     rm -rf /opt/cos/portal
     cp -r dist/ /opt/cos/portal
     chown -R cos:cos /opt/cos/portal
+    chmod 755 /opt/cos
+    chmod -R 755 /opt/cos/portal
 
     echo "[C-PORTAL] Installing nginx config..."
     cp /home/super/dev/cos/nginx/cos-portal.conf /etc/nginx/sites-available/cos-portal
