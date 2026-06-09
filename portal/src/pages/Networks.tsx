@@ -14,6 +14,7 @@ import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { StatusBadge } from '@/components/StatusBadge'
 import { useNetworks, useCreateNetwork, useDeleteNetwork } from '@/hooks/useNetworks'
+import { formatDate } from '@/utils/format'
 
 export function Networks() {
   const { data: networks = [], isLoading } = useNetworks()
@@ -85,7 +86,7 @@ export function Networks() {
                     <TableCell className="font-mono text-sm">{net.gateway ?? '—'}</TableCell>
                     <TableCell><StatusBadge status={net.status} /></TableCell>
                     <TableCell className="text-[var(--muted-foreground)] text-sm">
-                      {new Date(net.created_at).toLocaleDateString()}
+                      {formatDate(net.created_at)}
                     </TableCell>
                     <TableCell>
                       <Button variant="ghost" size="icon" onClick={() => deleteNetwork.mutate(net.id)}>

@@ -13,6 +13,7 @@ import {
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { useTemplates, useCreateTemplate, useDeleteTemplate } from '@/hooks/useTemplates'
+import { formatDate } from '@/utils/format'
 
 export function Templates() {
   const { data: templates = [], isLoading } = useTemplates()
@@ -93,7 +94,7 @@ export function Templates() {
                     <TableCell>{t.disk_gb} GB</TableCell>
                     <TableCell className="text-[var(--muted-foreground)] text-sm">{t.description ?? '—'}</TableCell>
                     <TableCell className="text-[var(--muted-foreground)] text-sm">
-                      {new Date(t.created_at).toLocaleDateString()}
+                      {formatDate(t.created_at)}
                     </TableCell>
                     <TableCell>
                       <Button

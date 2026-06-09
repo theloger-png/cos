@@ -7,6 +7,7 @@ import { StatusBadge } from '@/components/StatusBadge'
 import { ResourceBar } from '@/components/ResourceBar'
 import { useNode } from '@/hooks/useNodes'
 import { useVMs } from '@/hooks/useVMs'
+import { formatDate } from '@/utils/format'
 
 export function NodeDetail() {
   const { id } = useParams<{ id: string }>()
@@ -43,11 +44,11 @@ export function NodeDetail() {
             </div>
             <div className="flex justify-between">
               <span className="text-[var(--muted-foreground)]">Last Heartbeat</span>
-              <span>{node.last_heartbeat ? new Date(node.last_heartbeat).toLocaleString() : 'Never'}</span>
+              <span>{node.last_heartbeat ? formatDate(node.last_heartbeat) : 'Never'}</span>
             </div>
             <div className="flex justify-between">
               <span className="text-[var(--muted-foreground)]">Registered</span>
-              <span>{new Date(node.created_at).toLocaleDateString()}</span>
+              <span>{formatDate(node.created_at)}</span>
             </div>
           </CardContent>
         </Card>

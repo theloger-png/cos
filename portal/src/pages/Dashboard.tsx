@@ -5,6 +5,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@
 import { StatusBadge } from '@/components/StatusBadge'
 import { useNodes } from '@/hooks/useNodes'
 import { useVMs } from '@/hooks/useVMs'
+import { formatDate } from '@/utils/format'
 
 const mockTimelineData = Array.from({ length: 12 }, (_, i) => ({
   time: `${String(i * 2).padStart(2, '0')}:00`,
@@ -138,7 +139,7 @@ export function Dashboard() {
                     <TableCell>{vm.cpu_cores} cores</TableCell>
                     <TableCell>{vm.ram_mb >= 1024 ? `${vm.ram_mb / 1024} GB` : `${vm.ram_mb} MB`}</TableCell>
                     <TableCell className="text-[var(--muted-foreground)]">
-                      {new Date(vm.created_at).toLocaleDateString()}
+                      {formatDate(vm.created_at)}
                     </TableCell>
                   </TableRow>
                 ))

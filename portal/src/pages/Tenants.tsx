@@ -13,6 +13,7 @@ import {
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { useTenants, useCreateTenant } from '@/hooks/useTenants'
+import { formatDate } from '@/utils/format'
 
 export function Tenants() {
   const { data: tenants = [], isLoading } = useTenants()
@@ -69,7 +70,7 @@ export function Tenants() {
                     <TableCell className="font-medium">{t.name}</TableCell>
                     <TableCell className="text-[var(--muted-foreground)]">{t.description ?? '—'}</TableCell>
                     <TableCell className="text-[var(--muted-foreground)] text-sm">
-                      {new Date(t.created_at).toLocaleDateString()}
+                      {formatDate(t.created_at)}
                     </TableCell>
                   </TableRow>
                 ))

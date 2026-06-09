@@ -16,6 +16,7 @@ import { Label } from '@/components/ui/label'
 import { StatusBadge } from '@/components/StatusBadge'
 import { useVMs, useStartVM, useStopVM, useDeleteVM, useMigrateVM } from '@/hooks/useVMs'
 import { useNodes } from '@/hooks/useNodes'
+import { formatDate } from '@/utils/format'
 import type { VM } from '@/types'
 
 export function VMs() {
@@ -89,7 +90,7 @@ export function VMs() {
                     <TableCell>{vm.ram_mb >= 1024 ? `${vm.ram_mb / 1024} GB` : `${vm.ram_mb} MB`}</TableCell>
                     <TableCell>{vm.disk_gb} GB</TableCell>
                     <TableCell className="text-[var(--muted-foreground)] text-sm">
-                      {new Date(vm.created_at).toLocaleDateString()}
+                      {formatDate(vm.created_at)}
                     </TableCell>
                     <TableCell>
                       <div className="flex gap-1">
