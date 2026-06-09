@@ -67,13 +67,33 @@ async def get_node(
     return _node_to_info(node)
 
 
-@router.post("", response_model=NodeInfo, status_code=status.HTTP_201_CREATED)
+@router.post("", response_model=NodeInfo)
 async def register_node(
     body: NodeCreate,
     session: AsyncSession = Depends(db_session),
     auth: tuple[APIKey, Tenant | None] = Depends(current_auth),
 ) -> NodeInfo:
-    """Register a new physical node with the controller."""
+    """Register or update a physical node, keyed by ip_address."""
+    from fastapi.responses import JSONResponse
+
+    result = await session.execute(select(Node).where(Node.ip_address == body.ip_address))
+    existing = result.scalar_one_or_none()
+
+    if existing:
+        existing.hostname = body.hostname
+        existing.cpu_total = body.cpu_total
+        existing.ram_total_mb = body.ram_total_mb
+        existing.disk_total_gb = body.disk_total_gb
+        existing.nos_api_key = body.nos_api_key
+        existing.status = NodeStatus.offline.value
+        existing.last_heartbeat = datetime.now(timezone.utc)
+        await session.commit()
+        await session.refresh(existing)
+        return JSONResponse(
+            content=_node_to_info(existing).model_dump(mode="json"),
+            status_code=status.HTTP_200_OK,
+        )
+
     node = Node(
         hostname=body.hostname,
         ip_address=body.ip_address,
@@ -86,7 +106,10 @@ async def register_node(
     session.add(node)
     await session.commit()
     await session.refresh(node)
-    return _node_to_info(node)
+    return JSONResponse(
+        content=_node_to_info(node).model_dump(mode="json"),
+        status_code=status.HTTP_201_CREATED,
+    )
 
 
 @router.delete("/{node_id}", status_code=status.HTTP_204_NO_CONTENT)
