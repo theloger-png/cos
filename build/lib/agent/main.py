@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import datetime
 import json
 import logging
 import socket
@@ -92,7 +93,7 @@ async def _heartbeat_loop(client: httpx.AsyncClient) -> None:
 
             payload = {
                 "node_id": settings.node_id,
-                "timestamp": __import__("datetime").datetime.utcnow().isoformat(),
+                "timestamp": datetime.datetime.now(datetime.UTC).isoformat(),
                 "cpu_used": stats["cpu_percent"],
                 "ram_used_mb": stats["ram_used_mb"],
                 "disk_used_gb": stats["disk_used_gb"],
@@ -104,8 +105,10 @@ async def _heartbeat_loop(client: httpx.AsyncClient) -> None:
                 headers={"X-API-Key": settings.controller_api_key},
                 timeout=10,
             )
-            if resp.status_code != 204:
+            if resp.status_code not in (200, 201, 204):
                 logger.warning("Heartbeat returned status %d", resp.status_code)
+            else:
+                logger.debug("Heartbeat OK")
         except Exception as exc:
             logger.error("Heartbeat error: %s", exc)
 
