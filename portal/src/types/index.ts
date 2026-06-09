@@ -1,0 +1,103 @@
+export type NodeStatus = 'online' | 'offline' | 'error'
+export type VMStatus = 'running' | 'stopped' | 'starting' | 'stopping' | 'migrating' | 'error'
+export type NetworkStatus = 'active' | 'inactive' | 'error'
+
+export interface Node {
+  id: string
+  hostname: string
+  ip_address: string
+  status: NodeStatus
+  cpu_total: number
+  cpu_used: number
+  ram_total_mb: number
+  ram_used_mb: number
+  disk_total_gb: number
+  disk_used_gb: number
+  last_heartbeat: string | null
+  created_at: string
+  updated_at: string
+}
+
+export interface VM {
+  id: string
+  name: string
+  status: VMStatus
+  node_id: string | null
+  node_hostname?: string
+  template_id: string | null
+  cpu_cores: number
+  ram_mb: number
+  disk_gb: number
+  tenant_id: string | null
+  created_at: string
+  updated_at: string
+}
+
+export interface VMCreateRequest {
+  name: string
+  template_id: string
+  node_id?: string | null
+  cpu_cores?: number | null
+  ram_mb?: number | null
+  disk_gb?: number | null
+  tenant_id?: string | null
+}
+
+export interface Template {
+  id: string
+  name: string
+  cpu_cores: number
+  ram_mb: number
+  disk_gb: number
+  description: string | null
+  created_at: string
+  updated_at: string
+}
+
+export interface TemplateCreateRequest {
+  name: string
+  cpu_cores: number
+  ram_mb: number
+  disk_gb: number
+  description?: string
+}
+
+export interface Network {
+  id: string
+  name: string
+  vlan_id: number | null
+  cidr: string | null
+  gateway: string | null
+  status: NetworkStatus
+  tenant_id: string | null
+  created_at: string
+  updated_at: string
+}
+
+export interface NetworkCreateRequest {
+  name: string
+  vlan_id?: number
+  cidr?: string
+  gateway?: string
+  tenant_id?: string
+}
+
+export interface Tenant {
+  id: string
+  name: string
+  description: string | null
+  created_at: string
+  updated_at: string
+}
+
+export interface TenantCreateRequest {
+  name: string
+  description?: string
+}
+
+export interface PaginatedResponse<T> {
+  items: T[]
+  total: number
+  page: number
+  size: number
+}
