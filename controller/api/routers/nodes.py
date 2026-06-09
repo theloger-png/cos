@@ -5,7 +5,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime, timezone
 
-from common.models import NodeInfo, NodeStatus, VMInfo, VMStatus
+from common.models import HeartbeatPayload, NodeInfo, NodeStatus, VMInfo, VMStatus
 from controller.api.deps import current_auth, db_session
 from controller.db.models import APIKey, Node, Tenant, VM
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -25,11 +25,6 @@ class NodeCreate(BaseModel):
     nos_api_key: str = ""
 
 
-class HeartbeatIn(BaseModel):
-    cpu_used: float
-    ram_used_mb: int
-    disk_used_gb: float
-    vm_statuses: dict[str, VMStatus] = {}
 
 
 def _node_to_info(n: Node) -> NodeInfo:
@@ -139,12 +134,12 @@ async def list_node_vms(
     ]
 
 
-@router.post("/{node_id}/heartbeat", status_code=status.HTTP_204_NO_CONTENT)
+@router.post("/{node_id}/heartbeat", response_model=NodeInfo, status_code=status.HTTP_200_OK)
 async def receive_heartbeat(
     node_id: uuid.UUID,
-    body: HeartbeatIn,
+    body: HeartbeatPayload,
     session: AsyncSession = Depends(db_session),
-) -> None:
+) -> NodeInfo:
     """Accept a heartbeat from an agent and update node resource usage."""
     result = await session.execute(select(Node).where(Node.id == node_id))
     node = result.scalar_one_or_none()
@@ -164,3 +159,5 @@ async def receive_heartbeat(
             vm.status = vm_status.value
 
     await session.commit()
+    await session.refresh(node)
+    return _node_to_info(node)

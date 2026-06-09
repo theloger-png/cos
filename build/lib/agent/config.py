@@ -12,6 +12,7 @@ class AgentSettings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="COS_AGENT_", env_file=".env", extra="ignore")
 
     controller_url: str = "http://127.0.0.1:8090"
+    controller_api_key: str = ""
     node_id: str = ""
     ws_port: int = 8091
     heartbeat_interval_seconds: int = 30
