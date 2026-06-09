@@ -136,7 +136,6 @@ if [[ "$ROLE" == "controller" ]]; then
     SERVER_IP=$(hostname -I | awk '{print $1}')
     cd /home/super/dev/cos/portal
     printf 'VITE_API_URL=http://%s:8090\n' "$SERVER_IP" > .env.production
-    printf 'VITE_API_KEY=%s\n' "$(cat /opt/cos/admin_api_key)" >> .env.production
     npm install --legacy-peer-deps
     npm install react-is --legacy-peer-deps
     npm run build
@@ -184,7 +183,11 @@ EOF
     systemctl restart cos-controller
 
     echo ""
-    echo "COS Controller installed. API key: $(cat /opt/cos/admin_api_key)"
+    echo "COS Controller installed."
+    echo "  Admin API key:  $(cat /opt/cos/admin_api_key)"
+    if [[ -f /opt/cos/admin_password ]]; then
+        echo "  Admin password: $(cat /opt/cos/admin_password)"
+    fi
     echo "COS Portal available at http://$(hostname -I | awk '{print $1}')"
 
 fi
