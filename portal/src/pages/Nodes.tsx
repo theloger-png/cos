@@ -5,9 +5,14 @@ import { StatusBadge } from '@/components/StatusBadge'
 import { ResourceBar } from '@/components/ResourceBar'
 import { useNodes } from '@/hooks/useNodes'
 
+const formatGB = (val: number) => Math.round(val * 100) / 100
+
 function formatHeartbeat(ts: string | null): string {
   if (!ts) return 'Never'
-  const diff = Math.floor((Date.now() - new Date(ts).getTime()) / 1000)
+  const timestamp = new Date(ts)
+  if (isNaN(timestamp.getTime())) return 'Never'
+  const diff = Math.floor((Date.now() - timestamp.getTime()) / 1000)
+  if (diff < 0) return 'Now'
   if (diff < 60) return `${diff}s ago`
   if (diff < 3600) return `${Math.floor(diff / 60)}m ago`
   return `${Math.floor(diff / 3600)}h ago`
@@ -77,7 +82,7 @@ export function Nodes() {
                       <div className="w-32">
                         <ResourceBar used={node.ram_used_mb} total={node.ram_total_mb} unit="MB" showText={false} />
                         <div className="text-xs text-[var(--muted-foreground)] mt-1">
-                          {Math.round(node.ram_used_mb / 1024)}/{Math.round(node.ram_total_mb / 1024)} GB
+                          {formatGB(node.ram_used_mb / 1024)}/{formatGB(node.ram_total_mb / 1024)} GB
                         </div>
                       </div>
                     </TableCell>
@@ -85,7 +90,7 @@ export function Nodes() {
                       <div className="w-32">
                         <ResourceBar used={node.disk_used_gb} total={node.disk_total_gb} unit="GB" showText={false} />
                         <div className="text-xs text-[var(--muted-foreground)] mt-1">
-                          {node.disk_used_gb}/{node.disk_total_gb} GB
+                          {formatGB(node.disk_used_gb)}/{formatGB(node.disk_total_gb)} GB
                         </div>
                       </div>
                     </TableCell>
