@@ -53,6 +53,7 @@ async def _register_node(client: httpx.AsyncClient) -> None:
         resp = await client.post(
             f"{settings.controller_url}/api/v1/nodes",
             json=payload,
+            headers={"X-API-Key": settings.controller_api_key},
             timeout=10,
         )
         if resp.status_code in (200, 201, 409):
@@ -93,6 +94,7 @@ async def _heartbeat_loop(client: httpx.AsyncClient) -> None:
             resp = await client.post(
                 f"{settings.controller_url}/api/v1/nodes/{settings.node_id}/heartbeat",
                 json=payload,
+                headers={"X-API-Key": settings.controller_api_key},
                 timeout=10,
             )
             if resp.status_code != 204:
