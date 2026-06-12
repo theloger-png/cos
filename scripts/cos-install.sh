@@ -88,7 +88,7 @@ python3.12 -m venv /opt/cos/venv
 chown -R cos:cos /opt/cos/venv
 
 echo "[5/N] Installing COS Python package..."
-/opt/cos/venv/bin/pip install "$REPO_DIR/" -q
+/opt/cos/venv/bin/pip install --force-reinstall "$REPO_DIR/" -q
 /opt/cos/venv/bin/pip install -r "$REPO_DIR/requirements.txt" -q
 
 # ===========================================================================
