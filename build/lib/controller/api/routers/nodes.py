@@ -46,7 +46,7 @@ def _node_to_info(n: Node) -> NodeInfo:
 @router.get("", response_model=list[NodeInfo])
 async def list_nodes(
     session: AsyncSession = Depends(db_session),
-    auth: tuple[APIKey, Tenant | None] = Depends(current_auth),
+    auth: tuple[APIKey | None, Tenant | None] = Depends(current_auth),
 ) -> list[NodeInfo]:
     """List all registered nodes with their current status."""
     result = await session.execute(select(Node))
@@ -57,7 +57,7 @@ async def list_nodes(
 async def get_node(
     node_id: uuid.UUID,
     session: AsyncSession = Depends(db_session),
-    auth: tuple[APIKey, Tenant | None] = Depends(current_auth),
+    auth: tuple[APIKey | None, Tenant | None] = Depends(current_auth),
 ) -> NodeInfo:
     """Return details and current resource usage for a single node."""
     result = await session.execute(select(Node).where(Node.id == node_id))
@@ -71,7 +71,7 @@ async def get_node(
 async def register_node(
     body: NodeCreate,
     session: AsyncSession = Depends(db_session),
-    auth: tuple[APIKey, Tenant | None] = Depends(current_auth),
+    auth: tuple[APIKey | None, Tenant | None] = Depends(current_auth),
 ) -> NodeInfo:
     """Register or update a physical node, keyed by ip_address."""
     from fastapi.responses import JSONResponse
@@ -116,7 +116,7 @@ async def register_node(
 async def delete_node(
     node_id: uuid.UUID,
     session: AsyncSession = Depends(db_session),
-    auth: tuple[APIKey, Tenant | None] = Depends(current_auth),
+    auth: tuple[APIKey | None, Tenant | None] = Depends(current_auth),
 ) -> None:
     """Remove a node from the controller."""
     result = await session.execute(select(Node).where(Node.id == node_id))
@@ -131,7 +131,7 @@ async def delete_node(
 async def list_node_vms(
     node_id: uuid.UUID,
     session: AsyncSession = Depends(db_session),
-    auth: tuple[APIKey, Tenant | None] = Depends(current_auth),
+    auth: tuple[APIKey | None, Tenant | None] = Depends(current_auth),
 ) -> list[VMInfo]:
     """List all VMs currently assigned to the given node."""
     result = await session.execute(select(Node).where(Node.id == node_id))

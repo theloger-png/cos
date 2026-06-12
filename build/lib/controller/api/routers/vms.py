@@ -67,7 +67,7 @@ async def _get_node_or_404(session: AsyncSession, node_id: uuid.UUID) -> Node:
 @router.get("", response_model=list[VMInfo])
 async def list_vms(
     session: AsyncSession = Depends(db_session),
-    auth: tuple[APIKey, Tenant | None] = Depends(current_auth),
+    auth: tuple[APIKey | None, Tenant | None] = Depends(current_auth),
 ) -> list[VMInfo]:
     """List all VMs belonging to the authenticated tenant, or all VMs if admin."""
     _, tenant = auth
