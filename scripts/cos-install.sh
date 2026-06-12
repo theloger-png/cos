@@ -35,7 +35,7 @@ fi
 # --- Git pull (fetch latest code) -------------------------------------------
 
 echo "[0/N] Fetching latest code..."
-cd "$REPO_DIR" && git pull
+sudo -u "${SUDO_USER:-$USER}" git -C "$REPO_DIR" pull
 
 # --- Root check -------------------------------------------------------------
 
@@ -279,6 +279,7 @@ EOF
     systemctl daemon-reload
     systemctl enable cos-agent
     systemctl start cos-agent
+    systemctl restart cos-agent
 
     echo ""
     echo "COS Agent installed and started."
