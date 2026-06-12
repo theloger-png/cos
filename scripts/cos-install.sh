@@ -52,7 +52,7 @@ fi
 
 echo "[1/N] Installing common system packages..."
 apt-get update -q
-apt-get install -y -q python3.12 python3.12-venv python3.12-dev git curl wget pkg-config libvirt-dev
+apt-get install -y -q python3.12 python3.12-venv python3.12-dev git curl wget pkg-config libvirt-dev build-essential
 
 echo "[2/N] Creating cos group and user..."
 if ! getent group cos > /dev/null 2>&1; then
@@ -93,7 +93,7 @@ echo "[5/N] Installing COS Python package..."
 if [[ "$ROLE" == "controller" ]]; then
 
     echo "[C1] Installing PostgreSQL and build dependencies..."
-    apt-get install -y -q postgresql postgresql-contrib build-essential python3-dev libvirt-dev pkg-config
+    apt-get install -y -q postgresql postgresql-contrib python3-dev libvirt-dev pkg-config
 
     echo "[C2] Starting and enabling postgresql..."
     systemctl enable postgresql
