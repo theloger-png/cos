@@ -32,6 +32,11 @@ if [[ "$ROLE" != "controller" && "$ROLE" != "agent" ]]; then
     usage
 fi
 
+# --- Git pull (fetch latest code) -------------------------------------------
+
+echo "[0/N] Fetching latest code..."
+cd "$REPO_DIR" && git pull
+
 # --- Root check -------------------------------------------------------------
 
 if [[ "$(id -u)" -ne 0 ]]; then
@@ -83,7 +88,6 @@ python3.12 -m venv /opt/cos/venv
 chown -R cos:cos /opt/cos/venv
 
 echo "[5/N] Installing COS Python package..."
-cd "$REPO_DIR" && git pull
 /opt/cos/venv/bin/pip install "$REPO_DIR/" -q
 /opt/cos/venv/bin/pip install -r "$REPO_DIR/requirements.txt" -q
 
