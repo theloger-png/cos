@@ -61,6 +61,7 @@ async def _register_node(client: httpx.AsyncClient) -> None:
             node_id_path = "/opt/cos/node_id"
             with open(node_id_path, "w") as f:
                 f.write(node_id)
+            object.__setattr__(settings, "node_id", node_id)
             logger.info(
                 "Node registered with controller (status %d), node_id=%s",
                 resp.status_code,

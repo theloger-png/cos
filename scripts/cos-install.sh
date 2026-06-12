@@ -6,6 +6,7 @@ set -e
 # Usage: cos-install.sh --role controller|agent
 # ---------------------------------------------------------------------------
 
+REPO_DIR=$(cd "$(dirname "$0")/.." && pwd)
 ROLE=""
 
 usage() {
@@ -82,8 +83,8 @@ python3.12 -m venv /opt/cos/venv
 chown -R cos:cos /opt/cos/venv
 
 echo "[5/N] Installing COS Python package..."
-/opt/cos/venv/bin/pip install /home/super/dev/cos/ -q
-/opt/cos/venv/bin/pip install -r /home/super/dev/cos/requirements.txt -q
+/opt/cos/venv/bin/pip install "$REPO_DIR/" -q
+/opt/cos/venv/bin/pip install -r "$REPO_DIR/requirements.txt" -q
 
 # ===========================================================================
 # CONTROLLER
@@ -91,8 +92,8 @@ echo "[5/N] Installing COS Python package..."
 
 if [[ "$ROLE" == "controller" ]]; then
 
-    echo "[C1] Installing PostgreSQL..."
-    apt-get install -y -q postgresql postgresql-contrib
+    echo "[C1] Installing PostgreSQL and build dependencies..."
+    apt-get install -y -q postgresql postgresql-contrib build-essential python3-dev libvirt-dev pkg-config
 
     echo "[C2] Starting and enabling postgresql..."
     systemctl enable postgresql
@@ -106,7 +107,7 @@ if [[ "$ROLE" == "controller" ]]; then
 
     echo "[C4] Running database migrations..."
     COS_DATABASE_URL=postgresql+asyncpg://cos:cos@localhost/cos \
-        /opt/cos/venv/bin/alembic --config /home/super/dev/cos/alembic.ini upgrade head
+        /opt/cos/venv/bin/alembic --config "$REPO_DIR/alembic.ini" upgrade head
 
     echo "[C5] Creating controller config directory..."
     install -d -o cos -g cos -m 750 /opt/cos/config
@@ -134,8 +135,8 @@ if [[ "$ROLE" == "controller" ]]; then
 
     echo "[C-PORTAL] Building portal..."
     SERVER_IP=$(hostname -I | awk '{print $1}')
-    cd /home/super/dev/cos/portal
-    printf 'VITE_API_URL=http://%s:8090\n' "$SERVER_IP" > .env.production
+    cd "$REPO_DIR/portal"
+    printf 'VITE_API_URL=\n' > .env.production
     npm install --legacy-peer-deps
     npm install react-is --legacy-peer-deps
     npm run build
@@ -146,7 +147,7 @@ if [[ "$ROLE" == "controller" ]]; then
     chmod -R 755 /opt/cos/portal
 
     echo "[C-PORTAL] Installing nginx config..."
-    cp /home/super/dev/cos/nginx/cos-portal.conf /etc/nginx/sites-available/cos-portal
+    cp "$REPO_DIR/nginx/cos-portal.conf" /etc/nginx/sites-available/cos-portal
     sed -i "s|root /opt/cos/portal;|root /opt/cos/portal;|" /etc/nginx/sites-available/cos-portal
     sed -i "s|proxy_pass http://127.0.0.1:8090;|proxy_pass http://${SERVER_IP}:8090;|" /etc/nginx/sites-available/cos-portal
     ln -sf /etc/nginx/sites-available/cos-portal /etc/nginx/sites-enabled/cos-portal
@@ -218,6 +219,19 @@ if [[ "$ROLE" == "agent" ]]; then
         echo "       node_id already exists, skipping."
     fi
 
+    echo "[A4b] Writing agent config..."
+    if [[ ! -f /opt/cos/config/agent.env ]]; then
+        cat > /opt/cos/config/agent.env <<'EOF'
+COS_AGENT_CONTROLLER_URL=http://CONTROLLER_IP:8090
+COS_AGENT_CONTROLLER_API_KEY=REPLACE_ME
+COS_AGENT_LISTEN_PORT=8091
+EOF
+        chown cos:cos /opt/cos/config/agent.env
+        chmod 640 /opt/cos/config/agent.env
+    else
+        echo "       agent.env already exists, skipping."
+    fi
+
     echo "[A5] Writing cos-agent systemd service..."
     cat > /etc/systemd/system/cos-agent.service <<'EOF'
 [Unit]
@@ -241,12 +255,15 @@ RuntimeDirectoryMode=0750
 WantedBy=multi-user.target
 EOF
 
-    echo "[A6] Enabling and starting cos-agent..."
+    echo "[A6] Enabling cos-agent (not starting — edit agent.env first)..."
     systemctl daemon-reload
     systemctl enable cos-agent
-    systemctl restart cos-agent
 
     echo ""
     echo "COS Agent installed. Node ID: $(cat /opt/cos/node_id)"
+    echo ""
+    echo "IMPORTANT: Edit /opt/cos/config/agent.env and set COS_AGENT_CONTROLLER_URL"
+    echo "           and COS_AGENT_CONTROLLER_API_KEY before starting the agent service."
+    echo "           Then run: systemctl start cos-agent"
 
 fi
