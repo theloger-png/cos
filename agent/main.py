@@ -20,6 +20,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 _libvirt = LibvirtDriver(uri=settings.libvirt_uri)
+_active_node_id: str | None = None
 
 
 def _local_hostname() -> str:
@@ -40,6 +41,7 @@ def _local_ip() -> str:
 
 async def _register_node(client: httpx.AsyncClient) -> None:
     """Register this node with the controller and persist the assigned node_id."""
+    global _active_node_id
     stats = _libvirt.get_node_stats()
     payload = {
         "hostname": _local_hostname(),
@@ -61,7 +63,7 @@ async def _register_node(client: httpx.AsyncClient) -> None:
             node_id_path = "/opt/cos/node_id"
             with open(node_id_path, "w") as f:
                 f.write(node_id)
-            object.__setattr__(settings, "node_id", node_id)
+            _active_node_id = node_id
             logger.info(
                 "Node registered with controller (status %d), node_id=%s",
                 resp.status_code,
@@ -93,7 +95,7 @@ async def _heartbeat_loop(client: httpx.AsyncClient) -> None:
             }
 
             payload = {
-                "node_id": settings.node_id,
+                "node_id": _active_node_id,
                 "timestamp": datetime.datetime.now(datetime.UTC).isoformat(),
                 "cpu_used": stats["cpu_percent"],
                 "ram_used_mb": stats["ram_used_mb"],
@@ -101,7 +103,7 @@ async def _heartbeat_loop(client: httpx.AsyncClient) -> None:
                 "vm_statuses": vm_statuses,
             }
             resp = await client.post(
-                f"{settings.controller_url}/api/v1/nodes/{settings.node_id}/heartbeat",
+                f"{settings.controller_url}/api/v1/nodes/{_active_node_id}/heartbeat",
                 json=payload,
                 headers={"X-API-Key": settings.controller_api_key},
                 timeout=10,
