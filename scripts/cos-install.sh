@@ -199,6 +199,25 @@ fi
 
 if [[ "$ROLE" == "agent" ]]; then
 
+    echo "[A-PROMPT] Collecting controller details..."
+    CONTROLLER_URL=""
+    CONTROLLER_API_KEY=""
+
+    while [[ -z "$CONTROLLER_URL" ]]; do
+        read -p "Enter controller URL [http://CONTROLLER_IP:8090]: " CONTROLLER_URL
+        if [[ -z "$CONTROLLER_URL" ]]; then
+            echo "Error: controller URL cannot be empty."
+        fi
+    done
+
+    while [[ -z "$CONTROLLER_API_KEY" ]]; do
+        read -sp "Enter controller API key: " CONTROLLER_API_KEY
+        echo ""
+        if [[ -z "$CONTROLLER_API_KEY" ]]; then
+            echo "Error: controller API key cannot be empty."
+        fi
+    done
+
     echo "[A1] Installing KVM/libvirt packages..."
     apt-get install -y -q qemu-kvm libvirt-daemon-system libvirt-clients python3-libvirt
 
@@ -220,17 +239,13 @@ if [[ "$ROLE" == "agent" ]]; then
     fi
 
     echo "[A4b] Writing agent config..."
-    if [[ ! -f /opt/cos/config/agent.env ]]; then
-        cat > /opt/cos/config/agent.env <<'EOF'
-COS_AGENT_CONTROLLER_URL=http://CONTROLLER_IP:8090
-COS_AGENT_CONTROLLER_API_KEY=REPLACE_ME
+    cat > /opt/cos/config/agent.env <<EOF
+COS_AGENT_CONTROLLER_URL=${CONTROLLER_URL}
+COS_AGENT_CONTROLLER_API_KEY=${CONTROLLER_API_KEY}
 COS_AGENT_LISTEN_PORT=8091
 EOF
-        chown cos:cos /opt/cos/config/agent.env
-        chmod 640 /opt/cos/config/agent.env
-    else
-        echo "       agent.env already exists, skipping."
-    fi
+    chown cos:cos /opt/cos/config/agent.env
+    chmod 640 /opt/cos/config/agent.env
 
     echo "[A5] Writing cos-agent systemd service..."
     cat > /etc/systemd/system/cos-agent.service <<'EOF'
@@ -255,15 +270,14 @@ RuntimeDirectoryMode=0750
 WantedBy=multi-user.target
 EOF
 
-    echo "[A6] Enabling cos-agent (not starting — edit agent.env first)..."
+    echo "[A6] Starting cos-agent..."
     systemctl daemon-reload
     systemctl enable cos-agent
+    systemctl start cos-agent
 
     echo ""
-    echo "COS Agent installed. Node ID: $(cat /opt/cos/node_id)"
-    echo ""
-    echo "IMPORTANT: Edit /opt/cos/config/agent.env and set COS_AGENT_CONTROLLER_URL"
-    echo "           and COS_AGENT_CONTROLLER_API_KEY before starting the agent service."
-    echo "           Then run: systemctl start cos-agent"
+    echo "COS Agent installed and started."
+    echo "  Node ID: $(cat /opt/cos/node_id)"
+    echo "  Controller URL: ${CONTROLLER_URL}"
 
 fi
