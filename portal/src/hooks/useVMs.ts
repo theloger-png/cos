@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { createVM, deleteVM, getVMs, migrateVM, startVM, stopVM } from '@/api/vms'
-import type { VMCreateRequest } from '@/types'
+import type { VMCreateRequest, VMCreateResponse } from '@/types'
 
 export function useVMs() {
   return useQuery({
@@ -12,7 +12,7 @@ export function useVMs() {
 
 export function useCreateVM() {
   const qc = useQueryClient()
-  return useMutation({
+  return useMutation<VMCreateResponse, Error, VMCreateRequest>({
     mutationFn: (payload: VMCreateRequest) => createVM(payload),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['vms'] }),
   })

@@ -1,4 +1,4 @@
-import type { VM, VMCreateRequest } from '@/types'
+import type { VM, VMCreateRequest, VMCreateResponse } from '@/types'
 import client from './client'
 
 export async function getVMs(): Promise<VM[]> {
@@ -11,8 +11,8 @@ export async function getVM(id: string): Promise<VM> {
   return data
 }
 
-export async function createVM(payload: VMCreateRequest): Promise<VM> {
-  const { data } = await client.post<VM>('/api/v1/vms', payload)
+export async function createVM(payload: VMCreateRequest): Promise<VMCreateResponse> {
+  const { data } = await client.post<VMCreateResponse>('/api/v1/vms', payload)
   return data
 }
 

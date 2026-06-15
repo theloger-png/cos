@@ -1,16 +1,28 @@
 import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { ArrowLeft } from 'lucide-react'
+import { ArrowLeft, Copy, ShieldAlert } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogFooter,
+} from '@/components/ui/dialog'
 import { useCreateVM } from '@/hooks/useVMs'
 import { useTemplates } from '@/hooks/useTemplates'
 import { useNodes } from '@/hooks/useNodes'
 import { useTenants } from '@/hooks/useTenants'
 import { useNetworks } from '@/hooks/useNetworks'
+
+interface Credentials {
+  user: string
+  password: string
+}
 
 export function VMCreate() {
   const navigate = useNavigate()
@@ -28,6 +40,8 @@ export function VMCreate() {
   const [cpuCores, setCpuCores] = useState('')
   const [ramMb, setRamMb] = useState('')
   const [diskGb, setDiskGb] = useState('')
+
+  const [credentials, setCredentials] = useState<Credentials | null>(null)
 
   const selectedTemplate = templates.find((t) => t.id === templateId)
   const onlineNodes = nodes.filter((n) => n.status === 'online')
@@ -54,8 +68,24 @@ export function VMCreate() {
         disk_gb: disk,
         network_id: networkId === 'none' ? null : networkId,
       },
-      { onSuccess: () => navigate('/vms') },
+      {
+        onSuccess: (data) => {
+          if (data.cloud_init_password) {
+            setCredentials({
+              user: data.cloud_init_user ?? 'ubuntu',
+              password: data.cloud_init_password,
+            })
+          } else {
+            navigate('/vms')
+          }
+        },
+      },
     )
+  }
+
+  const handleCredentialsDismiss = () => {
+    setCredentials(null)
+    navigate('/vms')
   }
 
   return (
@@ -204,6 +234,66 @@ export function VMCreate() {
           </form>
         </CardContent>
       </Card>
+
+      <Dialog open={credentials !== null} onOpenChange={() => {}}>
+        <DialogContent
+          className="sm:max-w-md"
+          onInteractOutside={(e) => e.preventDefault()}
+        >
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <ShieldAlert className="h-5 w-5 text-yellow-400" />
+              VM Credentials
+            </DialogTitle>
+          </DialogHeader>
+
+          <div className="rounded-md border border-yellow-500/40 bg-yellow-500/10 p-3 text-sm text-yellow-300 mb-4">
+            Save this password now. It will not be shown again.
+          </div>
+
+          <div className="space-y-4">
+            <div className="space-y-1">
+              <Label className="text-xs text-[var(--muted-foreground)]">Username</Label>
+              <div className="flex items-center gap-2">
+                <code className="flex-1 rounded bg-[var(--muted)] px-3 py-2 text-sm font-mono">
+                  {credentials?.user}
+                </code>
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className="h-8 w-8 shrink-0"
+                  onClick={() => navigator.clipboard.writeText(credentials?.user ?? '')}
+                >
+                  <Copy className="h-3.5 w-3.5" />
+                </Button>
+              </div>
+            </div>
+
+            <div className="space-y-1">
+              <Label className="text-xs text-[var(--muted-foreground)]">Password</Label>
+              <div className="flex items-center gap-2">
+                <code className="flex-1 rounded bg-[var(--muted)] px-3 py-2 text-sm font-mono break-all">
+                  {credentials?.password}
+                </code>
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className="h-8 w-8 shrink-0"
+                  onClick={() => navigator.clipboard.writeText(credentials?.password ?? '')}
+                >
+                  <Copy className="h-3.5 w-3.5" />
+                </Button>
+              </div>
+            </div>
+          </div>
+
+          <DialogFooter className="mt-4">
+            <Button onClick={handleCredentialsDismiss} className="w-full">
+              I have saved the password — continue
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   )
 }
