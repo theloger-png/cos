@@ -7,7 +7,7 @@ import uuid
 
 from common.models import VMInfo, VMStatus
 from controller.agent_client.client import AgentClient
-from controller.api.deps import current_auth, current_tenant, db_session
+from controller.api.deps import current_auth, db_session
 from controller.db.models import APIKey, Node, Tenant, VM, VMTemplate
 from controller.scheduler.scheduler import Scheduler
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -22,6 +22,7 @@ router = APIRouter(prefix="/api/v1/vms", tags=["vms"])
 
 class VMCreate(BaseModel):
     name: str
+    tenant_id: uuid.UUID | None = None  # required when caller is admin; ignored for tenant-scoped callers
     template_id: uuid.UUID | None = None
     node_id: uuid.UUID | None = None
     cpu_cores: int
@@ -82,11 +83,12 @@ async def list_vms(
 async def get_vm(
     vm_id: uuid.UUID,
     session: AsyncSession = Depends(db_session),
-    tenant: Tenant = Depends(current_tenant),
+    auth: tuple[APIKey | None, Tenant | None] = Depends(current_auth),
 ) -> VMInfo:
     """Return details for a specific VM."""
+    _, tenant = auth
     vm = await _get_vm_or_404(session, vm_id)
-    if vm.tenant_id != tenant.id:
+    if tenant is not None and vm.tenant_id != tenant.id:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied")
     return _vm_to_info(vm)
 
@@ -95,9 +97,23 @@ async def get_vm(
 async def create_vm(
     body: VMCreate,
     session: AsyncSession = Depends(db_session),
-    tenant: Tenant = Depends(current_tenant),
+    auth: tuple[APIKey | None, Tenant | None] = Depends(current_auth),
 ) -> VMInfo:
     """Create and provision a new VM on a selected or auto-scheduled node."""
+    _, tenant = auth
+    if tenant is None:
+        # Admin caller: tenant_id must be provided in the request body
+        if body.tenant_id is None:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="tenant_id is required when creating a VM as admin",
+            )
+        t_result = await session.execute(select(Tenant).where(Tenant.id == body.tenant_id))
+        tenant = t_result.scalar_one_or_none()
+        if tenant is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Tenant not found")
+    effective_tenant_id = tenant.id
+
     image_path = ""
     if body.template_id:
         tpl_result = await session.execute(select(VMTemplate).where(VMTemplate.id == body.template_id))
@@ -123,7 +139,7 @@ async def create_vm(
 
     vm = VM(
         name=body.name,
-        tenant_id=tenant.id,
+        tenant_id=effective_tenant_id,
         node_id=node.id,
         cpu_cores=body.cpu_cores,
         ram_mb=body.ram_mb,
@@ -160,11 +176,12 @@ async def create_vm(
 async def destroy_vm(
     vm_id: uuid.UUID,
     session: AsyncSession = Depends(db_session),
-    tenant: Tenant = Depends(current_tenant),
+    auth: tuple[APIKey | None, Tenant | None] = Depends(current_auth),
 ) -> None:
     """Destroy a VM and release its resources."""
+    _, tenant = auth
     vm = await _get_vm_or_404(session, vm_id)
-    if vm.tenant_id != tenant.id:
+    if tenant is not None and vm.tenant_id != tenant.id:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied")
 
     node = await _get_node_or_404(session, vm.node_id)
@@ -180,10 +197,10 @@ async def _vm_action(
     vm_id: uuid.UUID,
     command: str,
     session: AsyncSession,
-    tenant: Tenant,
+    tenant: Tenant | None,
 ) -> dict:
     vm = await _get_vm_or_404(session, vm_id)
-    if vm.tenant_id != tenant.id:
+    if tenant is not None and vm.tenant_id != tenant.id:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied")
     if not vm.libvirt_uuid:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="VM has no libvirt UUID")
@@ -203,9 +220,10 @@ async def _vm_action(
 async def start_vm(
     vm_id: uuid.UUID,
     session: AsyncSession = Depends(db_session),
-    tenant: Tenant = Depends(current_tenant),
+    auth: tuple[APIKey | None, Tenant | None] = Depends(current_auth),
 ) -> dict:
     """Start a stopped VM."""
+    _, tenant = auth
     return await _vm_action(vm_id, "vm_start", session, tenant)
 
 
@@ -213,9 +231,10 @@ async def start_vm(
 async def stop_vm(
     vm_id: uuid.UUID,
     session: AsyncSession = Depends(db_session),
-    tenant: Tenant = Depends(current_tenant),
+    auth: tuple[APIKey | None, Tenant | None] = Depends(current_auth),
 ) -> dict:
     """Gracefully shut down a running VM."""
+    _, tenant = auth
     return await _vm_action(vm_id, "vm_stop", session, tenant)
 
 
@@ -223,9 +242,10 @@ async def stop_vm(
 async def reboot_vm(
     vm_id: uuid.UUID,
     session: AsyncSession = Depends(db_session),
-    tenant: Tenant = Depends(current_tenant),
+    auth: tuple[APIKey | None, Tenant | None] = Depends(current_auth),
 ) -> dict:
     """Reboot a running VM."""
+    _, tenant = auth
     return await _vm_action(vm_id, "vm_reboot", session, tenant)
 
 
@@ -234,11 +254,12 @@ async def migrate_vm(
     vm_id: uuid.UUID,
     body: MigrateRequest,
     session: AsyncSession = Depends(db_session),
-    tenant: Tenant = Depends(current_tenant),
+    auth: tuple[APIKey | None, Tenant | None] = Depends(current_auth),
 ) -> dict:
     """Live-migrate a VM to a different node."""
+    _, tenant = auth
     vm = await _get_vm_or_404(session, vm_id)
-    if vm.tenant_id != tenant.id:
+    if tenant is not None and vm.tenant_id != tenant.id:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied")
     if not vm.libvirt_uuid:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="VM has no libvirt UUID")

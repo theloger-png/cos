@@ -6,7 +6,7 @@ import logging
 import uuid
 
 from common.models import NetworkInfo
-from controller.api.deps import current_auth, current_tenant, db_session
+from controller.api.deps import current_auth, db_session
 from controller.db.models import APIKey, Network, Tenant
 from controller.nos_client.client import NOSClient
 from controller.config import settings
@@ -22,6 +22,7 @@ router = APIRouter(prefix="/api/v1/networks", tags=["networks"])
 
 class NetworkCreate(BaseModel):
     name: str
+    tenant_id: uuid.UUID | None = None  # required when caller is admin; ignored for tenant-scoped callers
     vlan_id: int
     cidr: str
     gateway: str
@@ -57,9 +58,23 @@ async def list_networks(
 async def create_network(
     body: NetworkCreate,
     session: AsyncSession = Depends(db_session),
-    tenant: Tenant = Depends(current_tenant),
+    auth: tuple[APIKey | None, Tenant | None] = Depends(current_auth),
 ) -> NetworkInfo:
     """Create a network and configure the corresponding VLAN on NOS."""
+    _, tenant = auth
+    if tenant is None:
+        # Admin caller: tenant_id must be provided in the request body
+        if body.tenant_id is None:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="tenant_id is required when creating a network as admin",
+            )
+        t_result = await session.execute(select(Tenant).where(Tenant.id == body.tenant_id))
+        tenant = t_result.scalar_one_or_none()
+        if tenant is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Tenant not found")
+    effective_tenant_id = tenant.id
+
     nos = NOSClient(base_url=settings.nos_api_url, api_key=settings.nos_api_key)
     ok = await nos.configure_vlan(body.vlan_id, body.name)
     if not ok:
@@ -70,7 +85,7 @@ async def create_network(
         logger.warning("NOS commit failed after VLAN %d creation", body.vlan_id)
 
     network = Network(
-        tenant_id=tenant.id,
+        tenant_id=effective_tenant_id,
         name=body.name,
         vlan_id=body.vlan_id,
         cidr=body.cidr,
@@ -86,14 +101,15 @@ async def create_network(
 async def delete_network(
     network_id: uuid.UUID,
     session: AsyncSession = Depends(db_session),
-    tenant: Tenant = Depends(current_tenant),
+    auth: tuple[APIKey | None, Tenant | None] = Depends(current_auth),
 ) -> None:
     """Delete a network and remove the corresponding VLAN from NOS."""
+    _, tenant = auth
     result = await session.execute(select(Network).where(Network.id == network_id))
     network = result.scalar_one_or_none()
     if not network:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Network not found")
-    if network.tenant_id != tenant.id:
+    if tenant is not None and network.tenant_id != tenant.id:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied")
 
     nos = NOSClient(base_url=settings.nos_api_url, api_key=settings.nos_api_key)
