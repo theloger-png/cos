@@ -18,6 +18,7 @@ class AgentSettings(BaseSettings):
     heartbeat_interval_seconds: int = 30
     nos_api_url: str = "http://127.0.0.1:8080"
     nos_api_key: str = ""
+    nos_api_key_file: str = "/opt/nos/api_key"
     libvirt_uri: str = "qemu:///system"
     vm_bridge: str = "nos-br"
 
