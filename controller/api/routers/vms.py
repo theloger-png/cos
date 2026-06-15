@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import uuid
 
-from common.models import VMInfo, VMStatus
+from common.models import VMHardwareConfig, VMInfo, VMStatus
 from controller.agent_client.client import AgentClient
 from controller.api.deps import current_auth, db_session
 from controller.credentials import generate_password, hash_password
@@ -30,6 +31,34 @@ class VMCreate(BaseModel):
     cpu_cores: int
     ram_mb: int
     disk_gb: int
+
+
+class AddDiskRequest(BaseModel):
+    """A new secondary disk to add to a VM."""
+
+    size_gb: float
+
+
+class AddNICRequest(BaseModel):
+    """A new NIC to add, identified by a COS Network (resolved to vlan_id by the controller)."""
+
+    network_id: uuid.UUID
+
+
+class RemoveNICRequest(BaseModel):
+    """An existing NIC to remove, identified by its kernel target name (e.g. vnet1)."""
+
+    target: str
+
+
+class VMHardwareChanges(BaseModel):
+    """Payload for PUT /api/v1/vms/{id}/hardware."""
+
+    vcpu: int | None = None
+    memory_mb: int | None = None
+    add_disks: list[AddDiskRequest] = []
+    add_nics: list[AddNICRequest] = []
+    remove_nics: list[RemoveNICRequest] = []
 
 
 class VMCreateResponse(VMInfo):
@@ -321,3 +350,130 @@ async def migrate_vm(
     vm.status = VMStatus.running.value
     await session.commit()
     return {"ok": True}
+
+
+# ---------------------------------------------------------------------------
+# VM hardware editing
+# ---------------------------------------------------------------------------
+
+
+async def _enrich_hardware_nics(
+    hardware: VMHardwareConfig,
+    session: AsyncSession,
+    vm: "VM",
+) -> VMHardwareConfig:
+    """Resolve each NIC's vlan_id to a COS Network for richer portal display."""
+    if not any(n.vlan_id is not None for n in hardware.nics):
+        return hardware
+
+    nets_result = await session.execute(
+        select(Network).where(Network.tenant_id == vm.tenant_id)
+    )
+    networks = {n.vlan_id: n for n in nets_result.scalars().all()}
+
+    enriched_nics = []
+    for nic in hardware.nics:
+        if nic.vlan_id is not None and nic.vlan_id in networks:
+            net = networks[nic.vlan_id]
+            nic = nic.model_copy(update={"network_id": net.id, "network_name": net.name})
+        enriched_nics.append(nic)
+
+    return hardware.model_copy(update={"nics": enriched_nics})
+
+
+@router.get("/{vm_id}/hardware", response_model=VMHardwareConfig)
+async def get_vm_hardware(
+    vm_id: uuid.UUID,
+    session: AsyncSession = Depends(db_session),
+    auth: tuple[APIKey | None, Tenant | None] = Depends(current_auth),
+) -> VMHardwareConfig:
+    """Return the current hardware configuration (CPU, RAM, disks, NICs) of a VM."""
+    _, tenant = auth
+    vm = await _get_vm_or_404(session, vm_id)
+    if tenant is not None and vm.tenant_id != tenant.id:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied")
+    if not vm.libvirt_uuid:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="VM has no libvirt UUID")
+
+    node = await _get_node_or_404(session, vm.node_id)
+    agent = AgentClient()
+    result = await agent.send_command(
+        node.ip_address, "vm_get_config", {"libvirt_uuid": vm.libvirt_uuid}
+    )
+    if not result.success:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Agent error: {result.error}",
+        )
+
+    raw = json.loads(result.output)
+    hardware = VMHardwareConfig.model_validate(raw)
+    hardware = await _enrich_hardware_nics(hardware, session, vm)
+    return hardware
+
+
+@router.put("/{vm_id}/hardware", response_model=VMHardwareConfig)
+async def put_vm_hardware(
+    vm_id: uuid.UUID,
+    body: VMHardwareChanges,
+    session: AsyncSession = Depends(db_session),
+    auth: tuple[APIKey | None, Tenant | None] = Depends(current_auth),
+) -> VMHardwareConfig:
+    """Apply hardware changes to a VM (CPU, RAM, disks, NICs).
+
+    Changes that require modifying the domain XML (vCPU, RAM, disks) will
+    trigger a graceful shutdown, redefinition, and restart. NIC-only changes
+    are applied live without rebooting.
+    """
+    _, tenant = auth
+    vm = await _get_vm_or_404(session, vm_id)
+    if tenant is not None and vm.tenant_id != tenant.id:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied")
+    if not vm.libvirt_uuid:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="VM has no libvirt UUID")
+
+    # Resolve network_id → vlan_id for each NIC to add
+    resolved_add_nics: list[dict] = []
+    for add_nic in body.add_nics:
+        net_result = await session.execute(
+            select(Network).where(Network.id == add_nic.network_id)
+        )
+        network = net_result.scalar_one_or_none()
+        if network is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Network {add_nic.network_id} not found",
+            )
+        if tenant is not None and network.tenant_id != tenant.id:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied")
+        resolved_add_nics.append({"vlan_id": network.vlan_id})
+
+    changes: dict = {}
+    if body.vcpu is not None:
+        changes["vcpu"] = body.vcpu
+    if body.memory_mb is not None:
+        changes["memory_mb"] = body.memory_mb
+    if body.add_disks:
+        changes["add_disks"] = [d.model_dump() for d in body.add_disks]
+    if resolved_add_nics:
+        changes["add_nics"] = resolved_add_nics
+    if body.remove_nics:
+        changes["remove_nics"] = [n.model_dump() for n in body.remove_nics]
+
+    node = await _get_node_or_404(session, vm.node_id)
+    agent = AgentClient()
+    result = await agent.send_command(
+        node.ip_address,
+        "vm_apply_config",
+        {"libvirt_uuid": vm.libvirt_uuid, "changes": changes},
+    )
+    if not result.success:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Agent error: {result.error}",
+        )
+
+    raw = json.loads(result.output)
+    hardware = VMHardwareConfig.model_validate(raw)
+    hardware = await _enrich_hardware_nics(hardware, session, vm)
+    return hardware
