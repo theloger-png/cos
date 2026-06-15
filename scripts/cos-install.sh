@@ -224,7 +224,7 @@ if [[ "$ROLE" == "agent" ]]; then
     done
 
     echo "[A1] Installing KVM/libvirt packages..."
-    apt-get install -y -q qemu-kvm libvirt-daemon-system libvirt-clients python3-libvirt
+    apt-get install -y -q qemu-kvm libvirt-daemon-system libvirt-clients python3-libvirt cloud-image-utils
 
     echo "[A2] Adding cos user to libvirt group..."
     usermod -aG libvirt cos
@@ -240,6 +240,7 @@ if [[ "$ROLE" == "agent" ]]; then
     install -d -o cos -g cos -m 750 /opt/cos/config
     install -d -o cos -g cos -m 750 /var/lib/cos
     install -d -o cos -g cos -m 750 /var/lib/cos/images
+    install -d -o cos -g cos -m 750 /var/lib/cos/seeds
 
     echo "[A4] Generating node ID..."
     if [[ ! -f /opt/cos/node_id ]]; then
