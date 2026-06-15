@@ -11,7 +11,7 @@ from agent.libvirt_driver import LibvirtDriver
 
 @pytest.fixture
 def driver() -> LibvirtDriver:
-    return LibvirtDriver(uri="qemu:///system")
+    return LibvirtDriver(uri="qemu:///system", bridge="nos-br")
 
 
 def _mock_conn() -> MagicMock:
@@ -64,6 +64,53 @@ class TestCreateVM:
             driver.create_vm("vm-01", 2, 2048, 20, "/images/ubuntu.qcow2")
 
         mock_copy.assert_called_once()
+
+    def test_xml_uses_bridge_interface(self, driver):
+        domain = _mock_domain()
+        conn = _mock_conn()
+        conn.defineXML.return_value = domain
+        captured_xml: list[str] = []
+
+        def capture_define(xml: str):
+            captured_xml.append(xml)
+            return domain
+
+        conn.defineXML.side_effect = capture_define
+
+        with patch("libvirt.open", return_value=conn), \
+             patch("os.makedirs"), \
+             patch("os.path.exists", return_value=False), \
+             patch("os.system"):
+            driver.create_vm("vm-01", 2, 2048, 20, "")
+
+        assert captured_xml, "defineXML was not called"
+        xml = captured_xml[0]
+        assert "type='bridge'" in xml
+        assert "<source bridge='nos-br'/>" in xml
+        assert "type='network'" not in xml
+        assert "network='default'" not in xml
+
+    def test_xml_uses_custom_bridge(self):
+        custom_driver = LibvirtDriver(uri="qemu:///system", bridge="custom-br0")
+        domain = _mock_domain()
+        conn = _mock_conn()
+        conn.defineXML.return_value = domain
+        captured_xml: list[str] = []
+
+        def capture_define(xml: str):
+            captured_xml.append(xml)
+            return domain
+
+        conn.defineXML.side_effect = capture_define
+
+        with patch("libvirt.open", return_value=conn), \
+             patch("os.makedirs"), \
+             patch("os.path.exists", return_value=False), \
+             patch("os.system"):
+            custom_driver.create_vm("vm-02", 1, 1024, 10, "")
+
+        xml = captured_xml[0]
+        assert "<source bridge='custom-br0'/>" in xml
 
 
 class TestStartVM:

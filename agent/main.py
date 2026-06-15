@@ -19,7 +19,7 @@ from common.models import VMStatus
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-_libvirt = LibvirtDriver(uri=settings.libvirt_uri)
+_libvirt = LibvirtDriver(uri=settings.libvirt_uri, bridge=settings.vm_bridge)
 _active_node_id: str | None = None
 
 

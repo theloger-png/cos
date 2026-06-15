@@ -36,8 +36,8 @@ _DOMAIN_XML_TEMPLATE = """\
       <source file='{disk_path}'/>
       <target dev='vda' bus='virtio'/>
     </disk>
-    <interface type='network'>
-      <source network='default'/>
+    <interface type='bridge'>
+      <source bridge='{bridge}'/>
       <model type='virtio'/>
     </interface>
     <console type='pty'>
@@ -52,8 +52,9 @@ _DOMAIN_XML_TEMPLATE = """\
 class LibvirtDriver:
     """Manages KVM virtual machines via libvirt."""
 
-    def __init__(self, uri: str = "qemu:///system") -> None:
+    def __init__(self, uri: str = "qemu:///system", bridge: str = "nos-br") -> None:
         self._uri = uri
+        self._bridge = bridge
 
     def _connect(self) -> libvirt.virConnect:
         conn = libvirt.open(self._uri)
@@ -86,6 +87,7 @@ class LibvirtDriver:
             ram_mb=ram_mb,
             cpu_cores=cpu_cores,
             disk_path=disk_path,
+            bridge=self._bridge,
         )
 
         conn = self._connect()

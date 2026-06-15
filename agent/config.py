@@ -19,6 +19,7 @@ class AgentSettings(BaseSettings):
     nos_api_url: str = "http://127.0.0.1:8080"
     nos_api_key: str = ""
     libvirt_uri: str = "qemu:///system"
+    vm_bridge: str = "nos-br"
 
     def model_post_init(self, __context: object) -> None:
         if not self.node_id:

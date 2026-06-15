@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI(title="COS Agent")
 
-_libvirt = LibvirtDriver(uri=settings.libvirt_uri)
+_libvirt = LibvirtDriver(uri=settings.libvirt_uri, bridge=settings.vm_bridge)
 _nos = NOSDriver(base_url=settings.nos_api_url, api_key=settings.nos_api_key)
 
 
