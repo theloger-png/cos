@@ -602,11 +602,19 @@ class TestGetVmConfig:
 # ---------------------------------------------------------------------------
 
 
+_SAMPLE_DOMAIN_XML_WITH_PCI = _SAMPLE_DOMAIN_XML.replace(
+    "<model type='virtio'/>",
+    "<model type='virtio'/>"
+    "<alias name='net0'/>"
+    "<address type='pci' domain='0x0000' bus='0x00' slot='0x06' function='0x0'/>",
+)
+
+
 class TestApplyVmConfigNicRemoval:
     """NIC removal — live detach + NOS cleanup, no reboot."""
 
-    def _run_remove(self, target="vnet0"):
-        domain = _mock_domain_for_config()
+    def _run_remove(self, target="vnet0", domain_xml=_SAMPLE_DOMAIN_XML):
+        domain = _mock_domain_for_config(domain_xml)
         domain.state.return_value = (1, 0)  # VIR_DOMAIN_RUNNING = 1
         conn = MagicMock()
         conn.lookupByUUIDString.return_value = domain
@@ -620,27 +628,95 @@ class TestApplyVmConfigNicRemoval:
              patch("subprocess.run", return_value=MagicMock(returncode=1)):
             # get_vm_config is called at the end too; avoid real libvirt there
             driver.get_vm_config = MagicMock(return_value={"vcpu": 2, "memory_mb": 2048, "disks": [], "nics": []})
-            driver.apply_vm_config("abc-123", {"remove_nics": [{"target": target}]}, nos_client)
+            result = driver.apply_vm_config("abc-123", {"remove_nics": [{"target": target}]}, nos_client)
 
-        return domain, nos_client
+        return domain, nos_client, result
 
     def test_detach_called(self):
-        domain, _ = self._run_remove()
+        domain, _, _ = self._run_remove()
         domain.detachDeviceFlags.assert_called_once()
 
     def test_nos_delete_called(self):
-        _, nos_client = self._run_remove("vnet0")
+        _, nos_client, _ = self._run_remove("vnet0")
         nos_client.post_config.assert_called_once()
         call_args = nos_client.post_config.call_args[0][0]
         assert any("delete interfaces vnet0" in c for c in call_args)
 
     def test_nos_commit_called(self):
-        _, nos_client = self._run_remove()
+        _, nos_client, _ = self._run_remove()
         nos_client.commit.assert_called_once()
 
     def test_no_shutdown_for_nic_only_removal(self):
-        domain, _ = self._run_remove()
+        domain, _, _ = self._run_remove()
         domain.shutdown.assert_not_called()
+
+    def test_detach_xml_has_no_address_or_alias(self):
+        """Detach XML must omit <address> and <alias> to avoid PCI mismatch."""
+        domain, _, _ = self._run_remove(domain_xml=_SAMPLE_DOMAIN_XML_WITH_PCI)
+        captured_xml = domain.detachDeviceFlags.call_args[0][0]
+        assert "<address" not in captured_xml
+        assert "<alias" not in captured_xml
+
+    def test_detach_xml_contains_mac_and_source(self):
+        """Detach XML must include the NIC's MAC and bridge source."""
+        domain, _, _ = self._run_remove()
+        captured_xml = domain.detachDeviceFlags.call_args[0][0]
+        assert "52:54:00:11:22:33" in captured_xml
+        assert "nos-br" in captured_xml
+        assert "virtio" in captured_xml
+
+    def test_nos_not_called_when_detach_fails(self):
+        """NOS cleanup must be skipped when detachDeviceFlags raises."""
+        import libvirt as _lv
+        domain = _mock_domain_for_config()
+        domain.state.return_value = (1, 0)
+        domain.detachDeviceFlags.side_effect = _lv.libvirtError("device not found")
+
+        conn = MagicMock()
+        conn.lookupByUUIDString.return_value = domain
+        nos_client = MagicMock()
+        driver = LibvirtDriver(uri="qemu:///system", bridge="nos-br")
+        driver.get_vm_config = MagicMock(return_value={"vcpu": 2, "memory_mb": 2048, "disks": [], "nics": []})
+
+        with patch("libvirt.open", return_value=conn), \
+             patch("os.path.exists", return_value=True), \
+             patch("subprocess.run", return_value=MagicMock(returncode=1)):
+            driver.apply_vm_config("abc-123", {"remove_nics": [{"target": "vnet0"}]}, nos_client)
+
+        nos_client.post_config.assert_not_called()
+        nos_client.commit.assert_not_called()
+
+    def test_result_reports_nic_failure_on_detach_error(self):
+        """apply_vm_config result must include nic_failures when detach fails."""
+        import libvirt as _lv
+        domain = _mock_domain_for_config()
+        domain.state.return_value = (1, 0)
+        domain.detachDeviceFlags.side_effect = _lv.libvirtError("no device found at address")
+
+        conn = MagicMock()
+        conn.lookupByUUIDString.return_value = domain
+        driver = LibvirtDriver(uri="qemu:///system", bridge="nos-br")
+        driver.get_vm_config = MagicMock(return_value={"vcpu": 2, "memory_mb": 2048, "disks": [], "nics": []})
+
+        with patch("libvirt.open", return_value=conn), \
+             patch("os.path.exists", return_value=True), \
+             patch("subprocess.run", return_value=MagicMock(returncode=1)):
+            result = driver.apply_vm_config("abc-123", {"remove_nics": [{"target": "vnet0"}]}, None)
+
+        assert len(result["nic_failures"]) == 1
+        assert result["nic_failures"][0]["target"] == "vnet0"
+        assert "no device found at address" in result["nic_failures"][0]["reason"]
+
+    def test_result_nic_failures_empty_on_success(self):
+        """apply_vm_config result has empty nic_failures when detach succeeds."""
+        _, _, result = self._run_remove()
+        assert result["nic_failures"] == []
+
+    def test_nos_called_when_detach_succeeds(self):
+        """NOS cleanup is called exactly once when detach succeeds."""
+        _, nos_client, _ = self._run_remove("vnet0")
+        nos_client.post_config.assert_called_once()
+        nos_client.commit.assert_called_once()
 
 
 class TestApplyVmConfigNicAddition:
