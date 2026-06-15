@@ -164,8 +164,10 @@ async def create_vm(
     )
     if result.success:
         vm.libvirt_uuid = result.output.strip()
+        vm.status = VMStatus.running.value
     else:
         logger.warning("vm_create agent command failed: %s", result.error)
+        vm.status = VMStatus.error.value
 
     await session.commit()
     await session.refresh(vm)
