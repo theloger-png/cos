@@ -37,6 +37,8 @@ async def _dispatch(command: AgentCommand) -> AgentCommandResult:
                 disk_gb=p["disk_gb"],
                 image_path=p.get("image_path", ""),
                 vlan_id=p.get("vlan_id"),
+                cloud_init_user=p.get("cloud_init_user"),
+                cloud_init_password_hash=p.get("cloud_init_password_hash"),
             )
             return AgentCommandResult(success=True, output=libvirt_uuid)
 

@@ -74,6 +74,50 @@ class TestRemoveVlanCommand:
         nos.remove_vlan.assert_awaited_once_with(77)
 
 
+class TestVmCreateCommand:
+    def _libvirt_mock(self, uuid: str = "test-uuid") -> MagicMock:
+        m = MagicMock()
+        m.create_vm = MagicMock(return_value=uuid)
+        return m
+
+    @pytest.mark.asyncio
+    async def test_passes_cloud_init_fields(self):
+        libvirt = self._libvirt_mock("abc-123")
+        payload = {
+            "name": "vm1",
+            "cpu_cores": 2,
+            "ram_mb": 1024,
+            "disk_gb": 10,
+            "cloud_init_user": "admin",
+            "cloud_init_password_hash": "$6$salt$hash",
+        }
+        with patch("agent.ws_server._libvirt", libvirt), patch("agent.ws_server._nos", _nos_mock(True)):
+            result = await _dispatch(AgentCommand(command="vm_create", payload=payload))
+        assert result.success is True
+        assert result.output == "abc-123"
+        libvirt.create_vm.assert_called_once_with(
+            name="vm1",
+            cpu_cores=2,
+            ram_mb=1024,
+            disk_gb=10,
+            image_path="",
+            vlan_id=None,
+            cloud_init_user="admin",
+            cloud_init_password_hash="$6$salt$hash",
+        )
+
+    @pytest.mark.asyncio
+    async def test_cloud_init_fields_absent_passes_none(self):
+        libvirt = self._libvirt_mock("xyz-456")
+        payload = {"name": "vm2", "cpu_cores": 1, "ram_mb": 512, "disk_gb": 5}
+        with patch("agent.ws_server._libvirt", libvirt), patch("agent.ws_server._nos", _nos_mock(True)):
+            result = await _dispatch(AgentCommand(command="vm_create", payload=payload))
+        assert result.success is True
+        call_kwargs = libvirt.create_vm.call_args
+        assert call_kwargs.kwargs.get("cloud_init_user") is None
+        assert call_kwargs.kwargs.get("cloud_init_password_hash") is None
+
+
 class TestUnknownCommand:
     @pytest.mark.asyncio
     async def test_returns_error(self):
