@@ -46,6 +46,17 @@ def _net_to_info(n: Network) -> NetworkInfo:
     )
 
 
+_NO_ONLINE_NODES_PROVISION = (
+    "No online nodes available — VLAN {vlan_id} was not provisioned on any node. "
+    "It will need to be configured manually or will apply only when a node next "
+    "becomes online and a VM is scheduled there."
+)
+_NO_ONLINE_NODES_REMOVE = (
+    "No online nodes available — VLAN {vlan_id} removal was not sent to any node. "
+    "Manual cleanup may be required on nodes that come back online."
+)
+
+
 async def _broadcast_vlan_command(
     command: str,
     vlan_id: int,
@@ -53,7 +64,8 @@ async def _broadcast_vlan_command(
 ) -> list[str]:
     """Send *command* with vlan_id to all *nodes* in parallel. Returns a list of warning strings."""
     if not nodes:
-        return []
+        template = _NO_ONLINE_NODES_REMOVE if command == "remove_vlan" else _NO_ONLINE_NODES_PROVISION
+        return [template.format(vlan_id=vlan_id)]
 
     async def _send(node: Node) -> str | None:
         result = await _agent_client.send_command(
@@ -148,4 +160,6 @@ async def delete_network(
     await session.commit()
 
     nodes = await _online_nodes(session)
-    await _broadcast_vlan_command("remove_vlan", vlan_id, nodes)
+    warnings = await _broadcast_vlan_command("remove_vlan", vlan_id, nodes)
+    for w in warnings:
+        logger.warning("delete_network vlan_id=%d — %s", vlan_id, w)

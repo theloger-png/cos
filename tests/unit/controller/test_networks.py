@@ -119,7 +119,7 @@ class TestCreateNetworkBroadcast:
             assert c.kwargs["payload"] == {"vlan_id": 100}
 
     @pytest.mark.asyncio
-    async def test_no_nodes_online_succeeds_with_no_broadcast(self):
+    async def test_no_nodes_online_returns_warning(self):
         from controller.api.routers.networks import create_network, NetworkCreate
 
         tenant = _make_tenant()
@@ -133,7 +133,25 @@ class TestCreateNetworkBroadcast:
 
         assert result.vlan_id == 50
         mock_agent.send_command.assert_not_called()
-        assert result.warnings == []
+        assert len(result.warnings) == 1
+        assert "50" in result.warnings[0]
+        assert "No online nodes" in result.warnings[0]
+
+    @pytest.mark.asyncio
+    async def test_online_nodes_present_no_no_online_nodes_warning(self):
+        from controller.api.routers.networks import create_network, NetworkCreate
+
+        tenant = _make_tenant()
+        node = _make_node()
+        session = _session_with_nodes([node])
+
+        body = NetworkCreate(name="net", vlan_id=77, cidr="10.7.0.0/24", gateway="10.7.0.1")
+
+        with patch("controller.api.routers.networks._agent_client") as mock_agent:
+            mock_agent.send_command = AsyncMock(return_value=_ok_result())
+            result = await create_network(body=body, session=session, auth=(None, tenant))
+
+        assert not any("No online nodes" in w for w in result.warnings)
 
     @pytest.mark.asyncio
     async def test_partial_node_failure_returns_warnings_not_exception(self):
@@ -262,6 +280,35 @@ class TestDeleteNetworkBroadcast:
             await delete_network(network_id=network.id, session=session, auth=(None, None))
 
         session.delete.assert_awaited_once_with(network)
+
+    @pytest.mark.asyncio
+    async def test_no_online_nodes_logs_warning_and_does_not_raise(self):
+        """When no nodes are online, delete still succeeds and logs a warning."""
+        from controller.api.routers.networks import delete_network
+
+        tenant = _make_tenant()
+        network = _make_network(tenant.id, vlan_id=42)
+
+        net_result = MagicMock()
+        net_result.scalar_one_or_none.return_value = network
+        nodes_result = MagicMock()
+        nodes_result.scalars.return_value.all.return_value = []
+
+        session = AsyncMock()
+        session.execute = AsyncMock(side_effect=[net_result, nodes_result])
+        session.delete = AsyncMock()
+        session.commit = AsyncMock()
+
+        with patch("controller.api.routers.networks._agent_client") as mock_agent, \
+             patch("controller.api.routers.networks.logger") as mock_logger:
+            mock_agent.send_command = AsyncMock(return_value=_ok_result())
+            await delete_network(network_id=network.id, session=session, auth=(None, None))
+
+        mock_agent.send_command.assert_not_called()
+        mock_logger.warning.assert_called()
+        warning_text = mock_logger.warning.call_args_list[0][0][0]
+        # The format string should reference the vlan_id arg
+        assert "42" in str(mock_logger.warning.call_args_list[0])
 
     @pytest.mark.asyncio
     async def test_offline_nodes_not_queried(self):
