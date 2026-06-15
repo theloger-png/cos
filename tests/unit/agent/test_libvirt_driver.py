@@ -873,7 +873,7 @@ class TestApplyVmConfigNicAddition:
 
         domain.attachDeviceFlags.assert_called_once()
 
-    def test_nos_vlan_provisioned(self):
+    def _run_add(self, vlan_id=111):
         domain = self._build_domain()
         conn = MagicMock()
         conn.lookupByUUIDString.return_value = domain
@@ -881,16 +881,51 @@ class TestApplyVmConfigNicAddition:
         nos_client.post_config.return_value = True
         nos_client.commit.return_value = True
         driver = LibvirtDriver(uri="qemu:///system", bridge="nos-br")
-        driver.get_vm_config = MagicMock(return_value={"vcpu": 2, "memory_mb": 2048, "disks": [], "nics": []})
+        driver.get_vm_config = MagicMock(
+            return_value={"vcpu": 2, "memory_mb": 2048, "disks": [], "nics": []}
+        )
 
         with patch("libvirt.open", return_value=conn), \
              patch("os.path.exists", return_value=True), \
              patch("subprocess.run", return_value=MagicMock(returncode=1)):
-            driver.apply_vm_config("abc-123", {"add_nics": [{"vlan_id": 101}]}, nos_client)
+            driver.apply_vm_config("abc-123", {"add_nics": [{"vlan_id": vlan_id}]}, nos_client)
 
+        return nos_client
+
+    def test_nos_vlan_provisioned(self):
+        nos_client = self._run_add(vlan_id=101)
         nos_client.post_config.assert_called_once()
         cmds = nos_client.post_config.call_args[0][0]
-        assert any("vlan members vlan101" in c for c in cmds)
+        assert any("vlan members 101" in c for c in cmds)
+        nos_client.commit.assert_called_once()
+
+    def test_nos_sends_interface_mode_access(self):
+        """post_config must include 'interface-mode access' for the new vnetX."""
+        nos_client = self._run_add(vlan_id=111)
+        cmds = nos_client.post_config.call_args[0][0]
+        assert any("interface-mode access" in c for c in cmds)
+
+    def test_nos_vlan_members_is_numeric_not_prefixed(self):
+        """'vlan members 111' must be sent, NOT 'vlan members vlan111'."""
+        nos_client = self._run_add(vlan_id=111)
+        cmds = nos_client.post_config.call_args[0][0]
+        assert any("vlan members 111" in c for c in cmds)
+        assert not any("vlan members vlan111" in c for c in cmds)
+
+    def test_nos_both_commands_in_one_post_config_call(self):
+        """Both interface-mode access and vlan members must be sent in a single post_config call."""
+        nos_client = self._run_add(vlan_id=111)
+        nos_client.post_config.assert_called_once()
+        cmds = nos_client.post_config.call_args[0][0]
+        assert len(cmds) == 2
+        access_cmds = [c for c in cmds if "interface-mode access" in c]
+        members_cmds = [c for c in cmds if "vlan members 111" in c]
+        assert len(access_cmds) == 1
+        assert len(members_cmds) == 1
+
+    def test_nos_commit_called_once_per_nic(self):
+        """Exactly one commit() is issued per newly attached NIC."""
+        nos_client = self._run_add(vlan_id=111)
         nos_client.commit.assert_called_once()
 
     def test_no_shutdown_for_nic_only_addition(self):

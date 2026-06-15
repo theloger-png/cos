@@ -636,7 +636,9 @@ class LibvirtDriver:
                     for new_target in after_targets - before_targets:
                         nos_client.post_config([
                             f"set interfaces {new_target} unit 0 family "
-                            f"ethernet-switching vlan members vlan{vlan_id}"
+                            f"ethernet-switching interface-mode access",
+                            f"set interfaces {new_target} unit 0 family "
+                            f"ethernet-switching vlan members {vlan_id}",
                         ])
                         nos_client.commit()
 
