@@ -84,7 +84,6 @@
 - End-to-end VM creation test with real KVM + disk image
 - Controller HA (PostgreSQL replication, Keepalived VIP)
 - HTTPS/SSL for portal and API
-- VLAN provisioning via NOS tested end-to-end
 
 ### Known Issues
 - node-1 (manually registered, no agent) shows "0s ago" heartbeat - cosmetic only
@@ -119,6 +118,16 @@
 
 ## Test Count
 - Total: TBD - run pytest from project root
+
+## Recent Changes (2026-06-15)
+- **Validated milestone**: Network create/delete via COS API provisions/removes VLANs in NOS end-to-end (commit 459a78d)
+  - Flow: POST /api/v1/networks → controller WebSocket to all online agents → agent nos_driver.py → configure_vlan/remove_vlan → NOS commit
+  - Tested on cos-node1: created network vlan_id=202, confirmed in `nos-cli show vlans`; deleted, confirmed removal
+  - Required: `cos` system user must be in `nos` group (cos-install.sh agent role now does `usermod -aG nos cos`)
+- **Fixed**: cos-agent crash-loop when NOS API key file is unreadable (PermissionError at import time)
+  - Root cause: cos user not in `nos` group → `/opt/nos/api_key` (mode 640 root:nos) unreadable → load_nos_driver raised at module import → entire agent down (heartbeats, vm_create, all commands)
+  - Primary fix: cos-install.sh --role agent now adds cos to nos group (step A2b)
+  - Defensive fix: nos_driver.py load_nos_driver() now catches OSError, returns a driver that logs and returns False on VLAN calls instead of crashing the process
 
 ## Recent Changes (2026-06-10)
 - Implemented: COS initial structure - controller, agent, common, portal

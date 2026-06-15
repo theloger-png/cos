@@ -229,6 +229,13 @@ if [[ "$ROLE" == "agent" ]]; then
     echo "[A2] Adding cos user to libvirt group..."
     usermod -aG libvirt cos
 
+    echo "[A2b] Adding cos user to nos group (required to read /opt/nos/api_key)..."
+    if getent group nos > /dev/null 2>&1; then
+        usermod -aG nos cos
+    else
+        echo "       nos group not found - skipping (run: usermod -aG nos cos after NOS is installed)"
+    fi
+
     echo "[A3] Creating agent directories..."
     install -d -o cos -g cos -m 750 /opt/cos/config
     install -d -o cos -g cos -m 750 /var/lib/cos

@@ -13,9 +13,10 @@ logger = logging.getLogger(__name__)
 class NOSDriver:
     """Configure local networking via the NOS REST API."""
 
-    def __init__(self, base_url: str, api_key: str) -> None:
+    def __init__(self, base_url: str, api_key: str, unavailable_reason: str | None = None) -> None:
         self._base_url = base_url.rstrip("/")
         self._headers = {"X-API-Key": api_key, "Content-Type": "application/json"}
+        self._unavailable_reason = unavailable_reason
 
     async def _run_commands(self, commands: list[str]) -> bool:
         """POST a list of CLI commands to /api/v1/config."""
@@ -54,6 +55,9 @@ class NOSDriver:
 
     async def configure_vlan(self, vlan_id: int) -> bool:
         """Create or activate a VLAN on the local switch port."""
+        if self._unavailable_reason:
+            logger.error("configure_vlan skipped: %s", self._unavailable_reason)
+            return False
         name = f"vlan{vlan_id}"
         ok = await self._run_commands([f"set vlans {name} vlan-id {vlan_id}"])
         if ok is False:
@@ -67,6 +71,9 @@ class NOSDriver:
 
     async def remove_vlan(self, vlan_id: int) -> bool:
         """Remove a VLAN from the local switch port."""
+        if self._unavailable_reason:
+            logger.error("remove_vlan skipped: %s", self._unavailable_reason)
+            return False
         name = f"vlan{vlan_id}"
         result = await self._run_commands([f"delete vlans {name}"])
         if result is False:
@@ -81,11 +88,18 @@ class NOSDriver:
 
 
 def load_nos_driver(base_url: str, api_key: str, api_key_file: str) -> NOSDriver:
-    """Construct a NOSDriver, loading the API key from *api_key_file* if not provided."""
+    """Construct a NOSDriver, loading the API key from *api_key_file* if not provided.
+
+    Never raises: if the key file is missing or unreadable, returns a driver that
+    logs an error and returns False on every call (lazy failure instead of crash).
+    """
+    unavailable_reason: str | None = None
     if not api_key:
-        p = Path(api_key_file)
-        if p.exists():
-            api_key = p.read_text().strip()
-        else:
+        try:
+            api_key = Path(api_key_file).read_text().strip()
+        except FileNotFoundError:
             logger.warning("NOS API key file not found: %s", api_key_file)
-    return NOSDriver(base_url=base_url, api_key=api_key)
+        except OSError as exc:
+            unavailable_reason = f"cannot read NOS API key file {api_key_file}: {exc}"
+            logger.warning(unavailable_reason)
+    return NOSDriver(base_url=base_url, api_key=api_key, unavailable_reason=unavailable_reason)

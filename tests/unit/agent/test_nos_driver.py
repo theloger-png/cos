@@ -156,3 +156,28 @@ class TestLoadNosDriver:
     def test_empty_key_when_file_missing(self):
         drv = load_nos_driver("http://127.0.0.1:8080", "", "/nonexistent/api_key")
         assert drv._headers["X-API-Key"] == ""
+
+    def test_does_not_raise_when_key_file_unreadable(self):
+        """Agent must not crash-loop if /opt/nos/api_key is mode 640 root:nos and cos is not in nos group."""
+        with patch("agent.nos_driver.Path") as mock_path_cls:
+            mock_path_cls.return_value.read_text.side_effect = PermissionError("Permission denied")
+            drv = load_nos_driver("http://127.0.0.1:8080", "", "/opt/nos/api_key")
+        assert drv is not None
+        assert drv._unavailable_reason is not None
+        assert "api_key" in drv._unavailable_reason
+
+    @pytest.mark.asyncio
+    async def test_configure_vlan_returns_false_when_key_unreadable(self):
+        with patch("agent.nos_driver.Path") as mock_path_cls:
+            mock_path_cls.return_value.read_text.side_effect = PermissionError("Permission denied")
+            drv = load_nos_driver("http://127.0.0.1:8080", "", "/opt/nos/api_key")
+        result = await drv.configure_vlan(100)
+        assert result is False
+
+    @pytest.mark.asyncio
+    async def test_remove_vlan_returns_false_when_key_unreadable(self):
+        with patch("agent.nos_driver.Path") as mock_path_cls:
+            mock_path_cls.return_value.read_text.side_effect = PermissionError("Permission denied")
+            drv = load_nos_driver("http://127.0.0.1:8080", "", "/opt/nos/api_key")
+        result = await drv.remove_vlan(100)
+        assert result is False
