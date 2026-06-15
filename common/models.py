@@ -69,6 +69,7 @@ class VMTemplate(BaseModel):
     disk_gb: int
     os_type: str
     image_path: str
+    cloud_init_user: str = "ubuntu"
     created_at: datetime
 
 

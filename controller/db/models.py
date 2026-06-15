@@ -57,6 +57,7 @@ class VMTemplate(Base):
     disk_gb: Mapped[int] = mapped_column(Integer, nullable=False)
     os_type: Mapped[str] = mapped_column(String(64), nullable=False)
     image_path: Mapped[str] = mapped_column(String(512), nullable=False)
+    cloud_init_user: Mapped[str] = mapped_column(String(64), nullable=False, default="ubuntu")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
