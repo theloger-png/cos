@@ -47,11 +47,10 @@ via REST API for networking configuration.
   - Fixed via commits 0d832f0 (admin JWT tenant context), da6713e (vm.status transitions), ac36cd3 (nos-br bridge attachment)
 
 ## Known Install Gaps
-- **cos-install.sh --role agent**: Must set permissions on libvirt image/disk paths:
-  - `/var/lib/cos` and `/var/lib/cos/images` and `/var/lib/cos/vms`: `chmod o+x` (libvirt-qemu needs traversal)
-  - Template image files (e.g., ubuntu-24.04.qcow2): `chmod o+r` (libvirt-qemu needs read access)
-  - Current workaround: manual `chmod o+x /var/lib/cos /var/lib/cos/{images,vms}` and `chmod o+r /var/lib/cos/images/*.qcow2` after template copy
-  - Root cause: cos:cos (750 dir mode) not readable by libvirt-qemu (uid 64055, gid kvm 994)
+- **cos-install.sh --role agent**: Template image files must be readable by libvirt-qemu after manual copy:
+  - After copying template images to `/var/lib/cos/images/`, run: `chmod o+r /var/lib/cos/images/*.qcow2`
+  - Root cause: copied files inherit the operator's umask; cos-install.sh cannot pre-create them
+  - Directories (`/var/lib/cos`, `/var/lib/cos/{images,vms,seeds}`) are now set to 755 and `libvirt-qemu` is added to the `cos` group automatically by the install script
 
 ## Do Not Implement Yet
 - Portal (React UI)

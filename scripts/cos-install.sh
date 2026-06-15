@@ -236,11 +236,20 @@ if [[ "$ROLE" == "agent" ]]; then
         echo "       nos group not found - skipping (run: usermod -aG nos cos after NOS is installed)"
     fi
 
+    echo "[A2c] Adding libvirt-qemu to cos group (required to read seed ISOs and VM disks)..."
+    if id libvirt-qemu > /dev/null 2>&1; then
+        usermod -aG cos libvirt-qemu
+    else
+        echo "       libvirt-qemu user not found - skipping (may appear after libvirtd first start)"
+    fi
+
     echo "[A3] Creating agent directories..."
     install -d -o cos -g cos -m 750 /opt/cos/config
-    install -d -o cos -g cos -m 750 /var/lib/cos
-    install -d -o cos -g cos -m 750 /var/lib/cos/images
-    install -d -o cos -g cos -m 750 /var/lib/cos/seeds
+    # 755 so libvirt-qemu (uid 64055) can traverse even without cos group membership
+    install -d -o cos -g cos -m 755 /var/lib/cos
+    install -d -o cos -g cos -m 755 /var/lib/cos/images
+    install -d -o cos -g cos -m 755 /var/lib/cos/vms
+    install -d -o cos -g cos -m 755 /var/lib/cos/seeds
 
     echo "[A4] Generating node ID..."
     if [[ ! -f /opt/cos/node_id ]]; then
