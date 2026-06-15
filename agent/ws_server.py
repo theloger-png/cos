@@ -7,6 +7,7 @@ import logging
 
 from agent.libvirt_driver import LibvirtDriver
 from agent.nos_driver import load_nos_driver
+from agent.nos_api_client import load_nos_api_client
 from agent.config import settings
 from common.models import AgentCommand, AgentCommandResult
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
@@ -19,6 +20,11 @@ _libvirt = LibvirtDriver(uri=settings.libvirt_uri, bridge=settings.vm_bridge)
 _nos = load_nos_driver(
     base_url=settings.nos_api_url,
     api_key=settings.nos_api_key,
+    api_key_file=settings.nos_api_key_file,
+)
+# Synchronous NOS client used for hardware-edit vnetX operations
+_nos_api = load_nos_api_client(
+    base_url=settings.nos_api_url,
     api_key_file=settings.nos_api_key_file,
 )
 
@@ -77,6 +83,16 @@ async def _dispatch(command: AgentCommand) -> AgentCommandResult:
         elif cmd == "remove_vlan":
             ok = await _nos.remove_vlan(p["vlan_id"])
             return AgentCommandResult(success=ok, output="removed" if ok else "", error=None if ok else "remove_vlan failed")
+
+        elif cmd == "vm_get_config":
+            config = _libvirt.get_vm_config(p["libvirt_uuid"], _nos_api)
+            return AgentCommandResult(success=True, output=json.dumps(config))
+
+        elif cmd == "vm_apply_config":
+            new_config = _libvirt.apply_vm_config(
+                p["libvirt_uuid"], p.get("changes", {}), _nos_api
+            )
+            return AgentCommandResult(success=True, output=json.dumps(new_config))
 
         else:
             return AgentCommandResult(success=False, output="", error=f"unknown command: {cmd}")
