@@ -636,6 +636,31 @@ class TestApplyVmConfigNicRemoval:
         domain, _, _ = self._run_remove()
         domain.detachDeviceFlags.assert_called_once()
 
+    def test_detach_uses_live_flag_only_when_running(self):
+        """Running domain: detach must use VIR_DOMAIN_AFFECT_LIVE alone, not combined."""
+        import libvirt as _lv
+        domain, _, _ = self._run_remove()  # domain.state returns VIR_DOMAIN_RUNNING
+        _, flags = domain.detachDeviceFlags.call_args[0]
+        assert flags == _lv.VIR_DOMAIN_AFFECT_LIVE
+
+    def test_detach_uses_config_flag_only_when_stopped(self):
+        """Stopped domain: detach must use VIR_DOMAIN_AFFECT_CONFIG alone."""
+        import libvirt as _lv
+        domain = _mock_domain_for_config(_SAMPLE_DOMAIN_XML)
+        domain.state.return_value = (5, 0)  # VIR_DOMAIN_SHUTOFF = 5
+        conn = MagicMock()
+        conn.lookupByUUIDString.return_value = domain
+        driver = LibvirtDriver(uri="qemu:///system", bridge="nos-br")
+        driver.get_vm_config = MagicMock(return_value={"vcpu": 2, "memory_mb": 2048, "disks": [], "nics": []})
+
+        with patch("libvirt.open", return_value=conn), \
+             patch("os.path.exists", return_value=True), \
+             patch("subprocess.run", return_value=MagicMock(returncode=1)):
+            driver.apply_vm_config("abc-123", {"remove_nics": [{"target": "vnet0"}]}, None)
+
+        _, flags = domain.detachDeviceFlags.call_args[0]
+        assert flags == _lv.VIR_DOMAIN_AFFECT_CONFIG
+
     def test_nos_delete_called(self):
         _, nos_client, _ = self._run_remove("vnet0")
         nos_client.post_config.assert_called_once()

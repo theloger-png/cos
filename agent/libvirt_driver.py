@@ -523,9 +523,10 @@ class LibvirtDriver:
                 )
 
                 state, _ = domain.state()
-                flags = libvirt.VIR_DOMAIN_AFFECT_CONFIG
                 if state == libvirt.VIR_DOMAIN_RUNNING:
-                    flags |= libvirt.VIR_DOMAIN_AFFECT_LIVE
+                    flags = libvirt.VIR_DOMAIN_AFFECT_LIVE
+                else:
+                    flags = libvirt.VIR_DOMAIN_AFFECT_CONFIG
 
                 detach_ok = False
                 try:
