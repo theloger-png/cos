@@ -2,20 +2,90 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import shutil
 import subprocess
 import tempfile
+import time
 import uuid
+import xml.etree.ElementTree as ET
 
 import libvirt
 import psutil
+
+# Preserve the NOS namespace prefix when round-tripping domain XML through ElementTree.
+ET.register_namespace("nos", "https://github.com/theloger-png/nos")
 
 logger = logging.getLogger(__name__)
 
 _DISK_BASE_DIR = "/var/lib/cos/vms"
 _SEED_BASE_DIR = "/var/lib/cos/seeds"
+
+# ---------------------------------------------------------------------------
+# Private helpers
+# ---------------------------------------------------------------------------
+
+
+def _mem_to_mib(value: int, unit: str) -> int:
+    """Convert a libvirt memory value with its unit string to MiB."""
+    u = unit.lower()
+    if u in ("b",):
+        return value // (1024 * 1024)
+    if u in ("kib", "k", "kb"):
+        return value // 1024
+    if u in ("mib", "m", "mb"):
+        return value
+    if u in ("gib", "g", "gb"):
+        return value * 1024
+    return value // 1024  # libvirt default is KiB
+
+
+def _disk_size_gb(path: str) -> float:
+    """Return the virtual disk size in GB via qemu-img, or 0.0 on failure."""
+    if not path or not os.path.exists(path):
+        return 0.0
+    try:
+        result = subprocess.run(
+            ["qemu-img", "info", "--output=json", path],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if result.returncode == 0:
+            info = json.loads(result.stdout)
+            return info.get("virtual-size", 0) / (1024 ** 3)
+    except Exception as exc:
+        logger.debug("qemu-img info failed for %s: %s", path, exc)
+    return 0.0
+
+
+def _vlan_for_iface(nos_config: dict | None, target: str) -> int | None:
+    """Parse a NOS GET /api/v1/config response to find the VLAN for *target*.
+
+    Handles both scalar members ("vlan101") and list members (["vlan101"]).
+    Returns None when the interface or VLAN cannot be determined.
+    """
+    if not nos_config or not target:
+        return None
+    try:
+        iface = nos_config.get("interfaces", {}).get(target, {})
+        members = (
+            iface.get("unit", {})
+            .get("0", {})
+            .get("family", {})
+            .get("ethernet-switching", {})
+            .get("vlan", {})
+            .get("members")
+        )
+        if isinstance(members, list) and members:
+            members = members[0]
+        if isinstance(members, str) and members.startswith("vlan"):
+            return int(members[4:])
+    except (KeyError, ValueError, TypeError, AttributeError):
+        pass
+    return None
 
 _NOS_METADATA_BLOCK = (
     "  <metadata>\n"
@@ -250,7 +320,6 @@ class LibvirtDriver:
                 pass
 
             disk_path: str | None = None
-            import xml.etree.ElementTree as ET
             root = ET.fromstring(xml)
             for source in root.findall(".//disk[@device='disk']/source"):
                 disk_path = source.get("file")
@@ -268,6 +337,7 @@ class LibvirtDriver:
             return False
         finally:
             conn.close()
+
 
     def migrate_vm(self, libvirt_uuid: str, target_uri: str) -> bool:
         """Live-migrate a domain to *target_uri*. Returns True on success."""
@@ -322,3 +392,267 @@ class LibvirtDriver:
             "disk_total_gb": disk.total / (1024 ** 3),
             "disk_used_gb": disk.used / (1024 ** 3),
         }
+
+    def get_vm_config(self, libvirt_uuid: str, nos_client: object | None = None) -> dict:
+        """Return the current hardware configuration of a domain as a plain dict.
+
+        Shape: {vcpu, memory_mb, disks: [{target, size_gb, path, device}],
+                nics: [{target, mac, bridge, vlan_id}]}
+
+        *nos_client* should be a NOSApiClient instance. When provided, each NIC's
+        vlan_id is resolved by querying GET /api/v1/config on the local NOS instance.
+        """
+        conn = self._connect()
+        try:
+            domain = conn.lookupByUUIDString(libvirt_uuid)
+            xml_str = domain.XMLDesc(0)
+        finally:
+            conn.close()
+
+        root = ET.fromstring(xml_str)
+
+        # --- vCPU ---
+        vcpu_elem = root.find("vcpu")
+        vcpu = int(vcpu_elem.text) if vcpu_elem is not None and vcpu_elem.text else 1
+
+        # --- Memory (libvirt default unit is KiB) ---
+        mem_elem = root.find("memory")
+        mem_val = int(mem_elem.text) if mem_elem is not None and mem_elem.text else 0
+        mem_unit = mem_elem.get("unit", "KiB") if mem_elem is not None else "KiB"
+        memory_mb = _mem_to_mib(mem_val, mem_unit)
+
+        # --- Disks ---
+        disks: list[dict] = []
+        for disk_elem in root.findall(".//disk"):
+            device = disk_elem.get("device", "disk")
+            source = disk_elem.find("source")
+            target = disk_elem.find("target")
+            if source is None or target is None:
+                continue
+            path = source.get("file", "")
+            dev = target.get("dev", "")
+            size_gb = _disk_size_gb(path)
+            disks.append({"target": dev, "size_gb": size_gb, "path": path, "device": device})
+
+        # --- NICs ---
+        nos_config = nos_client.get_config() if nos_client is not None else None
+        nics: list[dict] = []
+        for iface_elem in root.findall(".//interface[@type='bridge']"):
+            mac_elem = iface_elem.find("mac")
+            source = iface_elem.find("source")
+            target = iface_elem.find("target")
+            mac = mac_elem.get("address", "") if mac_elem is not None else ""
+            bridge = source.get("bridge", "") if source is not None else ""
+            vnet = target.get("dev", "") if target is not None else ""
+            vlan_id = _vlan_for_iface(nos_config, vnet)
+            nics.append({"target": vnet, "mac": mac, "bridge": bridge, "vlan_id": vlan_id})
+
+        return {"vcpu": vcpu, "memory_mb": memory_mb, "disks": disks, "nics": nics}
+
+    # ------------------------------------------------------------------
+    # Hardware editing
+    # ------------------------------------------------------------------
+
+    def apply_vm_config(
+        self,
+        libvirt_uuid: str,
+        changes: dict,
+        nos_client: object | None = None,
+    ) -> dict:
+        """Apply hardware changes to a domain and return the resulting config.
+
+        *changes* keys (all optional):
+            vcpu (int): new vCPU count
+            memory_mb (int): new RAM in MiB
+            add_disks (list[{size_gb}]): new secondary disks to create and attach
+            add_nics (list[{vlan_id}]): new NICs to attach on *bridge* and provision in NOS
+            remove_nics (list[{target}]): existing NIC target names to detach and remove from NOS
+
+        Apply order:
+        1. NIC removals (live detach + NOS cleanup) — no reboot
+        2. NIC additions (live attach + NOS VLAN provisioning) — no reboot
+        3. If vcpu/memory/disk changes: graceful shutdown → modify XML → redefine → start
+
+        Returns the updated hardware config dict (same shape as get_vm_config).
+        """
+        add_disks: list[dict] = changes.get("add_disks", [])
+        add_nics: list[dict] = changes.get("add_nics", [])
+        remove_nics: list[dict] = changes.get("remove_nics", [])
+        new_vcpu: int | None = changes.get("vcpu")
+        new_memory_mb: int | None = changes.get("memory_mb")
+        needs_reboot = bool(new_vcpu or new_memory_mb or add_disks)
+
+        conn = self._connect()
+        try:
+            domain = conn.lookupByUUIDString(libvirt_uuid)
+
+            # ── Step 1: NIC removals ──────────────────────────────────────
+            for nic in remove_nics:
+                target_name = nic.get("target", "")
+                if not target_name:
+                    continue
+                xml_str = domain.XMLDesc(0)
+                root = ET.fromstring(xml_str)
+                for iface_elem in root.findall(".//interface"):
+                    t = iface_elem.find("target")
+                    if t is None or t.get("dev") != target_name:
+                        continue
+                    iface_xml = ET.tostring(iface_elem, encoding="unicode")
+                    state, _ = domain.state()
+                    flags = libvirt.VIR_DOMAIN_AFFECT_CONFIG
+                    if state == libvirt.VIR_DOMAIN_RUNNING:
+                        flags |= libvirt.VIR_DOMAIN_AFFECT_LIVE
+                    try:
+                        domain.detachDeviceFlags(iface_xml, flags)
+                    except libvirt.libvirtError as exc:
+                        logger.warning("detach NIC %s failed: %s", target_name, exc)
+                    break
+
+                # NOS cleanup — idempotent even if the interface is already gone
+                if nos_client is not None:
+                    nos_client.post_config([f"delete interfaces {target_name}"])
+                    nos_client.commit()
+
+            # ── Step 2: NIC additions ─────────────────────────────────────
+            for nic in add_nics:
+                vlan_id = nic.get("vlan_id")
+                nic_xml = (
+                    f"<interface type='bridge'>"
+                    f"<source bridge='{self._bridge}'/>"
+                    f"<model type='virtio'/>"
+                    f"</interface>"
+                )
+
+                state, _ = domain.state()
+                is_running = state == libvirt.VIR_DOMAIN_RUNNING
+
+                # Capture interface targets before attachment so we can diff
+                before_xml = domain.XMLDesc(0)
+                before_targets = {
+                    e.find("target").get("dev")
+                    for e in ET.fromstring(before_xml).findall(".//interface[@type='bridge']")
+                    if e.find("target") is not None
+                }
+
+                flags = libvirt.VIR_DOMAIN_AFFECT_CONFIG
+                if is_running:
+                    flags |= libvirt.VIR_DOMAIN_AFFECT_LIVE
+
+                try:
+                    domain.attachDeviceFlags(nic_xml, flags)
+                except libvirt.libvirtError as exc:
+                    logger.error("attach NIC (vlan=%s) failed: %s", vlan_id, exc)
+                    continue
+
+                # Provision NOS only when the VM is running and vnetX is assigned
+                if is_running and nos_client is not None and vlan_id is not None:
+                    after_xml = domain.XMLDesc(0)
+                    after_targets = {
+                        e.find("target").get("dev")
+                        for e in ET.fromstring(after_xml).findall(".//interface[@type='bridge']")
+                        if e.find("target") is not None
+                    }
+                    for new_target in after_targets - before_targets:
+                        nos_client.post_config([
+                            f"set interfaces {new_target} unit 0 family "
+                            f"ethernet-switching vlan members vlan{vlan_id}"
+                        ])
+                        nos_client.commit()
+
+            # ── Step 3: Shutdown → modify XML → redefine → start ─────────
+            if needs_reboot:
+                state, _ = domain.state()
+                was_running = state == libvirt.VIR_DOMAIN_RUNNING
+
+                if was_running:
+                    try:
+                        domain.shutdown()
+                    except libvirt.libvirtError as exc:
+                        logger.warning("graceful shutdown failed, will force: %s", exc)
+
+                    # Wait up to 60 s for clean shutdown before forcing
+                    for _ in range(60):
+                        time.sleep(1)
+                        state, _ = domain.state()
+                        if state == libvirt.VIR_DOMAIN_SHUTOFF:
+                            break
+                    else:
+                        try:
+                            domain.destroy()
+                        except libvirt.libvirtError as exc:
+                            logger.warning("force destroy failed: %s", exc)
+
+                # Use the inactive (persistent) XML for clean redefinition
+                xml_str = domain.XMLDesc(libvirt.VIR_DOMAIN_XML_INACTIVE)
+                root = ET.fromstring(xml_str)
+
+                if new_vcpu is not None:
+                    vcpu_elem = root.find("vcpu")
+                    if vcpu_elem is not None:
+                        vcpu_elem.text = str(new_vcpu)
+
+                if new_memory_mb is not None:
+                    for tag in ("memory", "currentMemory"):
+                        elem = root.find(tag)
+                        if elem is not None:
+                            elem.set("unit", "KiB")
+                            elem.text = str(new_memory_mb * 1024)
+
+                for disk_change in add_disks:
+                    size_gb = disk_change.get("size_gb", 0)
+                    if not size_gb:
+                        continue
+
+                    # Determine next available virtio disk target (vda, vdb, …)
+                    used_letters = {
+                        e.find("target").get("dev")[2:]
+                        for e in root.findall(".//disk[@device='disk']")
+                        if e.find("target") is not None
+                        and len(e.find("target").get("dev", "")) == 3
+                        and e.find("target").get("dev", "").startswith("vd")
+                    }
+                    next_letter = next(
+                        (c for c in "abcdefghijklmnopqrstuvwxyz" if c not in used_letters),
+                        None,
+                    )
+                    if next_letter is None:
+                        logger.error("No available disk targets for VM %s", libvirt_uuid)
+                        continue
+
+                    next_dev = f"vd{next_letter}"
+                    os.makedirs(_DISK_BASE_DIR, exist_ok=True)
+                    disk_path = os.path.join(_DISK_BASE_DIR, f"{libvirt_uuid}-{next_dev}.qcow2")
+
+                    result = subprocess.run(
+                        ["qemu-img", "create", "-f", "qcow2", disk_path, f"{size_gb}G"],
+                        capture_output=True,
+                        text=True,
+                    )
+                    if result.returncode != 0:
+                        logger.error(
+                            "qemu-img create failed for %s: %s", disk_path, result.stderr
+                        )
+                        continue
+
+                    disk_xml = (
+                        f"<disk type='file' device='disk'>"
+                        f"<driver name='qemu' type='qcow2'/>"
+                        f"<source file='{disk_path}'/>"
+                        f"<target dev='{next_dev}' bus='virtio'/>"
+                        f"</disk>"
+                    )
+                    devices_elem = root.find("devices")
+                    if devices_elem is not None:
+                        devices_elem.append(ET.fromstring(disk_xml))
+
+                new_xml = ET.tostring(root, encoding="unicode")
+                domain = conn.defineXML(new_xml)
+                if domain is None:
+                    raise RuntimeError(f"defineXML failed for VM {libvirt_uuid}")
+
+                if was_running:
+                    domain.create()
+        finally:
+            conn.close()
+
+        return self.get_vm_config(libvirt_uuid, nos_client)
