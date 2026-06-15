@@ -12,28 +12,33 @@ import {
 } from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { StatusBadge } from '@/components/StatusBadge'
 import { useNetworks, useCreateNetwork, useDeleteNetwork } from '@/hooks/useNetworks'
+import { useTenants } from '@/hooks/useTenants'
 import { formatDate } from '@/utils/format'
 
 export function Networks() {
   const { data: networks = [], isLoading } = useNetworks()
   const createNetwork = useCreateNetwork()
   const deleteNetwork = useDeleteNetwork()
+  const { data: tenants = [] } = useTenants()
 
   const [open, setOpen] = useState(false)
   const [name, setName] = useState('')
+  const [tenantId, setTenantId] = useState('')
   const [vlanId, setVlanId] = useState('')
   const [cidr, setCidr] = useState('')
   const [gateway, setGateway] = useState('')
 
-  const resetForm = () => { setName(''); setVlanId(''); setCidr(''); setGateway('') }
+  const resetForm = () => { setName(''); setTenantId(''); setVlanId(''); setCidr(''); setGateway('') }
 
   const handleCreate = (e: React.FormEvent) => {
     e.preventDefault()
     createNetwork.mutate(
       {
         name,
+        tenant_id: tenantId,
         vlan_id: vlanId ? parseInt(vlanId) : undefined,
         cidr: cidr || undefined,
         gateway: gateway || undefined,
@@ -109,6 +114,21 @@ export function Networks() {
           <form onSubmit={handleCreate}>
             <div className="space-y-4 py-2">
               <div className="space-y-2">
+                <Label>Tenant *</Label>
+                <Select value={tenantId} onValueChange={setTenantId} required>
+                  <SelectTrigger>
+                    <SelectValue placeholder="Select a tenant..." />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {tenants.map((t) => (
+                      <SelectItem key={t.id} value={t.id}>
+                        {t.name}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+              <div className="space-y-2">
                 <Label>Name *</Label>
                 <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="tenant-vlan-100" required />
               </div>
@@ -134,7 +154,7 @@ export function Networks() {
             )}
             <DialogFooter>
               <Button type="button" variant="outline" onClick={() => setOpen(false)}>Cancel</Button>
-              <Button type="submit" disabled={!name || createNetwork.isPending}>
+              <Button type="submit" disabled={!name || !tenantId || createNetwork.isPending}>
                 {createNetwork.isPending ? 'Creating...' : 'Create'}
               </Button>
             </DialogFooter>
