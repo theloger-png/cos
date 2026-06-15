@@ -120,7 +120,13 @@
 - Total: TBD - run pytest from project root
 
 ## Recent Changes (2026-06-15)
-- **Validated milestone**: Network create/delete via COS API provisions/removes VLANs in NOS end-to-end (commit 459a78d)
+- **Validated milestone** (afternoon): Portal UI end-to-end validation - Networks create/delete and VM Create form working through browser
+  - Network create/delete: UI now has optional cidr/gateway fields (L2-only by default), Tenant selector added to Networks dialog (commits 7ae5411, beb561f)
+  - VM Create form: Tenant + Network selectors added, resource fields auto-populated from template defaults, 422 validation error display fixed (commit 7812f89)
+  - Full chain validated: created VLAN 101 via portal Networks page at http://188.213.242.235 → controller → agent → NOS, confirmed with `show vlans` on cos-node1
+  - Network access: DNAT via 185.45.15.70 → 188.213.242.235 → 10.111.1.203; note http:// required (no TLS configured, browsers default to https on :443)
+  - Architecture decision: Edge router deferred to future - dedicated NOS VM with trunk interface on nos-br, per-VLAN IRBs manual via nos-cli; Network.cidr/gateway remain informational only for now
+- **Validated milestone** (early): Network create/delete via COS API provisions/removes VLANs in NOS end-to-end (commit 459a78d)
   - Flow: POST /api/v1/networks → controller WebSocket to all online agents → agent nos_driver.py → configure_vlan/remove_vlan → NOS commit
   - Tested on cos-node1: created network vlan_id=202, confirmed in `nos-cli show vlans`; deleted, confirmed removal
   - Required: `cos` system user must be in `nos` group (cos-install.sh agent role now does `usermod -aG nos cos`)
