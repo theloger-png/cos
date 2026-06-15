@@ -126,11 +126,17 @@ export interface NICInfo {
   network_name: string | null
 }
 
+export interface NICFailure {
+  target: string
+  reason: string
+}
+
 export interface VMHardwareConfig {
   vcpu: number
   memory_mb: number
   disks: DiskInfo[]
   nics: NICInfo[]
+  nic_failures: NICFailure[]
 }
 
 export interface VMHardwareChanges {

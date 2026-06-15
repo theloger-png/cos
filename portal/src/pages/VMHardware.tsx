@@ -16,7 +16,7 @@ import {
 } from '@/components/ui/dialog'
 import { useVMHardware, useApplyVMHardware } from '@/hooks/useVMs'
 import { useNetworks } from '@/hooks/useNetworks'
-import type { VMHardwareChanges } from '@/types'
+import type { NICFailure, VMHardwareChanges } from '@/types'
 
 export function VMHardware() {
   const { id } = useParams<{ id: string }>()
@@ -42,6 +42,7 @@ export function VMHardware() {
   // Confirmation dialog
   const [confirmOpen, setConfirmOpen] = useState(false)
   const [applyError, setApplyError] = useState<string | null>(null)
+  const [nicFailureWarnings, setNicFailureWarnings] = useState<NICFailure[]>([])
 
   // Seed local state when hardware loads
   useEffect(() => {
@@ -99,11 +100,14 @@ export function VMHardware() {
     if (memoryChanged) changes.memory_mb = memoryMb
 
     applyHardware.mutate(changes, {
-      onSuccess: () => {
+      onSuccess: (data) => {
         setConfirmOpen(false)
         setDisksToAdd([])
         setNicsToAdd([])
         setNicsToRemove([])
+        if (data.nic_failures?.length) {
+          setNicFailureWarnings(data.nic_failures)
+        }
       },
       onError: (err) => {
         setConfirmOpen(false)
@@ -129,6 +133,22 @@ export function VMHardware() {
         <div className="text-sm text-red-400 bg-red-400/10 border border-red-400/20 rounded px-3 py-2 flex items-center justify-between">
           <span>{applyError}</span>
           <button onClick={() => setApplyError(null)} className="ml-4 text-red-400 hover:text-red-300">✕</button>
+        </div>
+      )}
+
+      {nicFailureWarnings.length > 0 && (
+        <div className="text-sm text-yellow-300 bg-yellow-500/10 border border-yellow-500/30 rounded px-3 py-2">
+          <div className="flex items-center justify-between mb-1">
+            <span className="font-medium">Some NIC operations failed — the VM's networking may be inconsistent</span>
+            <button onClick={() => setNicFailureWarnings([])} className="ml-4 text-yellow-400 hover:text-yellow-200">✕</button>
+          </div>
+          <ul className="space-y-0.5 mt-1">
+            {nicFailureWarnings.map((f, i) => (
+              <li key={i} className="text-yellow-200/80">
+                <span className="font-mono">{f.target}</span>: {f.reason}
+              </li>
+            ))}
+          </ul>
         </div>
       )}
 
