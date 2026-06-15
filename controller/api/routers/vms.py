@@ -8,6 +8,7 @@ import uuid
 from common.models import VMInfo, VMStatus
 from controller.agent_client.client import AgentClient
 from controller.api.deps import current_auth, db_session
+from controller.credentials import generate_password, hash_password
 from controller.db.models import APIKey, Network, Node, Tenant, VM, VMTemplate
 from controller.scheduler.scheduler import Scheduler
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -29,6 +30,13 @@ class VMCreate(BaseModel):
     cpu_cores: int
     ram_mb: int
     disk_gb: int
+
+
+class VMCreateResponse(VMInfo):
+    """VM create response that includes one-time cloud-init credentials."""
+
+    cloud_init_user: str | None = None
+    cloud_init_password: str | None = None
 
 
 class MigrateRequest(BaseModel):
@@ -94,13 +102,17 @@ async def get_vm(
     return _vm_to_info(vm)
 
 
-@router.post("", response_model=VMInfo, status_code=status.HTTP_201_CREATED)
+@router.post("", response_model=VMCreateResponse, status_code=status.HTTP_201_CREATED)
 async def create_vm(
     body: VMCreate,
     session: AsyncSession = Depends(db_session),
     auth: tuple[APIKey | None, Tenant | None] = Depends(current_auth),
-) -> VMInfo:
-    """Create and provision a new VM on a selected or auto-scheduled node."""
+) -> VMCreateResponse:
+    """Create and provision a new VM on a selected or auto-scheduled node.
+
+    Returns one-time cloud-init credentials (cloud_init_user, cloud_init_password)
+    in the response body. The plaintext password is never persisted.
+    """
     _, tenant = auth
     if tenant is None:
         # Admin caller: tenant_id must be provided in the request body
@@ -127,12 +139,14 @@ async def create_vm(
         vlan_id = network.vlan_id
 
     image_path = ""
+    cloud_init_user = "ubuntu"
     if body.template_id:
         tpl_result = await session.execute(select(VMTemplate).where(VMTemplate.id == body.template_id))
         tpl = tpl_result.scalar_one_or_none()
         if not tpl:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Template not found")
         image_path = tpl.image_path
+        cloud_init_user = tpl.cloud_init_user
 
     if body.node_id:
         node = await _get_node_or_404(session, body.node_id)
@@ -148,6 +162,9 @@ async def create_vm(
             )
         node_result = await session.execute(select(Node).where(Node.ip_address == selected.ip_address))
         node = node_result.scalar_one()
+
+    plaintext_password = generate_password()
+    password_hash = hash_password(plaintext_password)
 
     vm = VM(
         name=body.name,
@@ -169,6 +186,8 @@ async def create_vm(
         "ram_mb": vm.ram_mb,
         "disk_gb": vm.disk_gb,
         "image_path": image_path,
+        "cloud_init_user": cloud_init_user,
+        "cloud_init_password_hash": password_hash,
     }
     if vlan_id is not None:
         vm_create_payload["vlan_id"] = vlan_id
@@ -182,7 +201,12 @@ async def create_vm(
 
     await session.commit()
     await session.refresh(vm)
-    return _vm_to_info(vm)
+    base = _vm_to_info(vm)
+    return VMCreateResponse(
+        **base.model_dump(),
+        cloud_init_user=cloud_init_user,
+        cloud_init_password=plaintext_password,
+    )
 
 
 @router.delete("/{vm_id}", status_code=status.HTTP_204_NO_CONTENT)
