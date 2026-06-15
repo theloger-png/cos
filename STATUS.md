@@ -120,6 +120,24 @@
 - Total: TBD - run pytest from project root
 
 ## Recent Changes (2026-06-15)
+- **Validated milestone** (late afternoon): Cloud-init credentials and VM hardware editing features (13 commits, 216 tests)
+  - **Cloud-init credentials** (commits 6a793c0, 88e5236, 0be52ca, e87db9d, 0333e99, 6ccb624, 579eec9):
+    - VMTemplate now has cloud_init_user field (default "ubuntu"), editable in portal Templates page
+    - On vm_create, controller generates random 16-char password + SHA-512 hash
+    - Agent builds cloud-init seed ISO (cloud-localds) with chpasswd for template's cloud_init_user, ssh_pwauth enabled, unique instance-id per VM
+    - Portal shows one-time credentials modal after VM creation
+    - Validated end-to-end: login via virsh console with generated credentials works correctly
+    - Fixed: ws_server.py wasn't passing cloud_init_user/cloud_init_password_hash to create_vm (commit 579eec9)
+    - Fixed: seed ISO permissions - libvirt-qemu needs read access to /var/lib/cos/seeds/ (added cos group, dir mode 755)
+  - **VM hardware editing** (commits ef4dc6f, c4e4477, 59f8623, 195d273, 57dc1eb, efffced):
+    - New GET/PUT /api/v1/vms/{id}/hardware endpoints for CPU/RAM/disk/NIC configuration
+    - Agent: get_vm_config (parses domain XML, resolves NIC VLANs via NOS REST API) and apply_vm_config
+    - Portal: new VM hardware editor page - edit vCPU/RAM, add secondary disks, add/remove NICs with COS Network selector, pending-changes summary, apply confirmation (reboot warning only for CPU/RAM/disk)
+    - NIC add/remove are live (no reboot); CPU/RAM/disk changes trigger graceful shutdown → reconfigure → restart
+    - Validated end-to-end on cos-node1/test111: disk add (vdb 10GB), RAM 2048→4096, vCPU 2→3 (all via reboot), NIC add/remove (live, correct VLAN auto-provisioned)
+    - Fixed: NIC detach now uses minimal XML (mac/source/model only) and single libvirt flag (LIVE or CONFIG, not combined); NOS cleanup only on successful detach
+    - Fixed: per-NIC failures surfaced in API/portal; NOS config response parsing now correctly resolves vlan_id per vnetX
+    - Fixed: add_nics now sends correct "interface-mode access" + numeric "vlan members <id>" (was invalid "vlan members vlan<id>")
 - **Validated milestone** (afternoon): Portal UI end-to-end validation - Networks create/delete and VM Create form working through browser
   - Network create/delete: UI now has optional cidr/gateway fields (L2-only by default), Tenant selector added to Networks dialog (commits 7ae5411, beb561f)
   - VM Create form: Tenant + Network selectors added, resource fields auto-populated from template defaults, 422 validation error display fixed (commit 7812f89)

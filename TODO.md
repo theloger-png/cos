@@ -1,5 +1,22 @@
 # COS Project TODO
 
+## Next Up
+
+### Portal CRUD for Templates and Networks
+- [ ] Edit form for Templates (update cloud_init_user, resource defaults)
+- [ ] Edit form for Networks (update vlan_id, cidr, gateway, tenant)
+- [ ] Delete confirmations with resource count (N VMs use this template, etc.)
+
+### VM Password and ISO Management
+- [ ] Password reset for running VM (regenerate cloud-init seed ISO + graceful reboot)
+- [ ] CD/ISO management (upload, attach to VM, set boot order)
+- [ ] Create VM without template (blank disk + boot from attached ISO)
+
+### Web Console
+- [ ] noVNC web console for VM access (investigated NIC hotplug feasibility this session - confirmed working)
+- [ ] Web console endpoint behind portal authentication
+- [ ] Design: how to integrate with existing hardware editor flow
+
 ## Deferred Features
 
 ### Edge Router (Future)
