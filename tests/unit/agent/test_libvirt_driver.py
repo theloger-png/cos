@@ -13,6 +13,7 @@ from agent.libvirt_driver import (
     _make_cloud_init_meta_data,
     _mem_to_mib,
     _disk_size_gb,
+    _parse_vlan_map,
     _vlan_for_iface,
 )
 
@@ -488,6 +489,92 @@ class TestVlanForIface:
 
 
 # ---------------------------------------------------------------------------
+# _parse_vlan_map tests
+# ---------------------------------------------------------------------------
+
+
+class TestParseVlanMap:
+    def test_extracts_vlan_id_for_present_interface(self):
+        response = {
+            "commands": [
+                'set interfaces vnet9 unit 0 family ethernet-switching interface-mode access',
+                'set interfaces vnet9 unit 0 family ethernet-switching vlan members 111',
+            ]
+        }
+        result = _parse_vlan_map(response)
+        assert result.get("vnet9") == 111
+
+    def test_returns_none_via_missing_key_for_absent_interface(self):
+        response = {
+            "commands": [
+                'set interfaces vnet9 unit 0 family ethernet-switching vlan members 111',
+            ]
+        }
+        result = _parse_vlan_map(response)
+        assert result.get("vnet99") is None
+
+    def test_handles_quoted_vlan_member_value(self):
+        response = {
+            "commands": [
+                'set interfaces vnet3 unit 0 family ethernet-switching vlan members "202"',
+            ]
+        }
+        result = _parse_vlan_map(response)
+        assert result.get("vnet3") == 202
+
+    def test_multiple_interfaces_mapped_independently(self):
+        response = {
+            "commands": [
+                'set interfaces vnet0 unit 0 family ethernet-switching vlan members 100',
+                'set interfaces vnet1 unit 0 family ethernet-switching vlan members 200',
+                'set interfaces vnet2 unit 0 family ethernet-switching vlan members 300',
+            ]
+        }
+        result = _parse_vlan_map(response)
+        assert result.get("vnet0") == 100
+        assert result.get("vnet1") == 200
+        assert result.get("vnet2") == 300
+
+    def test_last_entry_wins_for_duplicate_interface(self):
+        response = {
+            "commands": [
+                'set interfaces vnet5 unit 0 family ethernet-switching vlan members 10',
+                'set interfaces vnet5 unit 0 family ethernet-switching vlan members 20',
+            ]
+        }
+        result = _parse_vlan_map(response)
+        assert result.get("vnet5") == 20
+
+    def test_normalises_unit_suffix_in_ifname(self):
+        response = {
+            "commands": [
+                'set interfaces vnet7.0 unit 0 family ethernet-switching vlan members 77',
+            ]
+        }
+        result = _parse_vlan_map(response)
+        assert result.get("vnet7") == 77
+        assert "vnet7.0" not in result
+
+    def test_returns_empty_dict_for_none_response(self):
+        assert _parse_vlan_map(None) == {}
+
+    def test_returns_empty_dict_when_commands_key_missing(self):
+        assert _parse_vlan_map({"other_key": []}) == {}
+
+    def test_ignores_non_vlan_members_commands(self):
+        response = {
+            "commands": [
+                'set interfaces vnet0 unit 0 family ethernet-switching interface-mode access',
+                'set vlans vlan100 vlan-id 100',
+                'set interfaces vnet0 unit 0 family ethernet-switching vlan members 100',
+            ]
+        }
+        result = _parse_vlan_map(response)
+        assert len(result) == 1
+        assert result["vnet0"] == 100
+
+
+# ---------------------------------------------------------------------------
 # get_vm_config tests
 # ---------------------------------------------------------------------------
 
@@ -561,15 +648,15 @@ class TestGetVmConfig:
         assert nic["bridge"] == "nos-br"
 
     def test_nic_vlan_id_from_nos_client(self):
-        nos_config = {
-            "interfaces": {
-                "vnet0": {
-                    "unit": {"0": {"family": {"ethernet-switching": {"vlan": {"members": "vlan101"}}}}}
-                }
-            }
+        """get_vm_config resolves vlan_id via NOS set-command config response."""
+        nos_response = {
+            "commands": [
+                "set interfaces vnet0 unit 0 family ethernet-switching interface-mode access",
+                "set interfaces vnet0 unit 0 family ethernet-switching vlan members 101",
+            ]
         }
         nos_client = MagicMock()
-        nos_client.get_config.return_value = nos_config
+        nos_client.get_config.return_value = nos_response
         result = self._run(nos_client=nos_client)
         assert result["nics"][0]["vlan_id"] == 101
 

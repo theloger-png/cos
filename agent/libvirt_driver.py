@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -86,6 +87,51 @@ def _vlan_for_iface(nos_config: dict | None, target: str) -> int | None:
     except (KeyError, ValueError, TypeError, AttributeError):
         pass
     return None
+
+_VLAN_MEMBERS_RE = re.compile(
+    r"set\s+interfaces\s+(\S+)\s+unit\s+\d+\s+family\s+ethernet-switching"
+    r"\s+vlan\s+members\s+\"?(\d+)\"?"
+)
+
+
+def _parse_vlan_map(nos_response: dict | None) -> dict[str, int]:
+    """Parse a NOS GET /api/v1/config response into an {ifname: vlan_id} mapping.
+
+    The response contains a list of JunOS-style set-command strings under the key
+    "commands".  Only lines matching the ethernet-switching vlan members pattern
+    are processed; all other lines are ignored.
+
+    Tolerances:
+    - Quoted or unquoted numeric VLAN IDs (``vlan members 111`` and
+      ``vlan members "111"`` are both accepted).
+    - Interface names with a unit suffix (``vnet9.0``) are normalised to their
+      base name (``vnet9``) before insertion into the map.
+    - When the same interface appears more than once, the *last* matching line
+      wins (mirrors how NOS overwrites the same config leaf on repeated set
+      commands).
+
+    Returns an empty dict when *nos_response* is None, missing the "commands"
+    key, or contains no matching lines.
+    """
+    if not nos_response:
+        return {}
+    commands = nos_response.get("commands", [])
+    if not isinstance(commands, list):
+        return {}
+    vlan_map: dict[str, int] = {}
+    for cmd in commands:
+        if not isinstance(cmd, str):
+            continue
+        m = _VLAN_MEMBERS_RE.search(cmd)
+        if not m:
+            continue
+        ifname = m.group(1).split(".")[0]  # strip ".0" unit suffix if present
+        try:
+            vlan_map[ifname] = int(m.group(2))
+        except ValueError:
+            continue
+    return vlan_map
+
 
 _NOS_METADATA_BLOCK = (
     "  <metadata>\n"
@@ -436,6 +482,7 @@ class LibvirtDriver:
 
         # --- NICs ---
         nos_config = nos_client.get_config() if nos_client is not None else None
+        vlan_map = _parse_vlan_map(nos_config)
         nics: list[dict] = []
         for iface_elem in root.findall(".//interface[@type='bridge']"):
             mac_elem = iface_elem.find("mac")
@@ -444,7 +491,7 @@ class LibvirtDriver:
             mac = mac_elem.get("address", "") if mac_elem is not None else ""
             bridge = source.get("bridge", "") if source is not None else ""
             vnet = target.get("dev", "") if target is not None else ""
-            vlan_id = _vlan_for_iface(nos_config, vnet)
+            vlan_id = vlan_map.get(vnet)
             nics.append({"target": vnet, "mac": mac, "bridge": bridge, "vlan_id": vlan_id})
 
         return {"vcpu": vcpu, "memory_mb": memory_mb, "disks": disks, "nics": nics}
