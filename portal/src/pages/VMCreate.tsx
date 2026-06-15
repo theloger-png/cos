@@ -9,35 +9,50 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { useCreateVM } from '@/hooks/useVMs'
 import { useTemplates } from '@/hooks/useTemplates'
 import { useNodes } from '@/hooks/useNodes'
+import { useTenants } from '@/hooks/useTenants'
+import { useNetworks } from '@/hooks/useNetworks'
 
 export function VMCreate() {
   const navigate = useNavigate()
   const createVM = useCreateVM()
   const { data: templates = [] } = useTemplates()
   const { data: nodes = [] } = useNodes()
+  const { data: tenants = [] } = useTenants()
+  const { data: allNetworks = [] } = useNetworks()
 
   const [name, setName] = useState('')
+  const [tenantId, setTenantId] = useState('')
   const [templateId, setTemplateId] = useState('')
   const [nodeId, setNodeId] = useState('auto')
+  const [networkId, setNetworkId] = useState('none')
   const [cpuCores, setCpuCores] = useState('')
   const [ramMb, setRamMb] = useState('')
   const [diskGb, setDiskGb] = useState('')
 
   const selectedTemplate = templates.find((t) => t.id === templateId)
   const onlineNodes = nodes.filter((n) => n.status === 'online')
+  const networks = tenantId
+    ? allNetworks.filter((n) => n.tenant_id === tenantId)
+    : allNetworks
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault()
-    if (!name || !templateId) return
+    if (!name || !templateId || !tenantId) return
+
+    const cpu = cpuCores ? parseInt(cpuCores) : selectedTemplate?.cpu_cores ?? 1
+    const ram = ramMb ? parseInt(ramMb) : selectedTemplate?.ram_mb ?? 512
+    const disk = diskGb ? parseInt(diskGb) : selectedTemplate?.disk_gb ?? 10
 
     createVM.mutate(
       {
         name,
+        tenant_id: tenantId,
         template_id: templateId,
         node_id: nodeId === 'auto' ? null : nodeId,
-        cpu_cores: cpuCores ? parseInt(cpuCores) : undefined,
-        ram_mb: ramMb ? parseInt(ramMb) : undefined,
-        disk_gb: diskGb ? parseInt(diskGb) : undefined,
+        cpu_cores: cpu,
+        ram_mb: ram,
+        disk_gb: disk,
+        network_id: networkId === 'none' ? null : networkId,
       },
       { onSuccess: () => navigate('/vms') },
     )
@@ -68,6 +83,22 @@ export function VMCreate() {
             </div>
 
             <div className="space-y-2">
+              <Label>Tenant *</Label>
+              <Select value={tenantId} onValueChange={setTenantId} required>
+                <SelectTrigger>
+                  <SelectValue placeholder="Select a tenant..." />
+                </SelectTrigger>
+                <SelectContent>
+                  {tenants.map((t) => (
+                    <SelectItem key={t.id} value={t.id}>
+                      {t.name}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+
+            <div className="space-y-2">
               <Label>Template *</Label>
               <Select value={templateId} onValueChange={setTemplateId} required>
                 <SelectTrigger>
@@ -94,6 +125,23 @@ export function VMCreate() {
                   {onlineNodes.map((n) => (
                     <SelectItem key={n.id} value={n.id}>
                       {n.hostname} ({n.ip_address})
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+
+            <div className="space-y-2">
+              <Label>Network (optional)</Label>
+              <Select value={networkId} onValueChange={setNetworkId}>
+                <SelectTrigger>
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="none">None / default VLAN</SelectItem>
+                  {networks.map((n) => (
+                    <SelectItem key={n.id} value={n.id}>
+                      {n.name}{n.vlan_id != null ? ` (VLAN ${n.vlan_id})` : ''}
                     </SelectItem>
                   ))}
                 </SelectContent>
@@ -146,7 +194,7 @@ export function VMCreate() {
             )}
 
             <div className="flex gap-3 pt-2">
-              <Button type="submit" disabled={!name || !templateId || createVM.isPending}>
+              <Button type="submit" disabled={!name || !templateId || !tenantId || createVM.isPending}>
                 {createVM.isPending ? 'Creating...' : 'Create VM'}
               </Button>
               <Button type="button" variant="outline" onClick={() => navigate('/vms')}>

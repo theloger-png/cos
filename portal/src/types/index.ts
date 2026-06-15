@@ -35,12 +35,13 @@ export interface VM {
 
 export interface VMCreateRequest {
   name: string
-  template_id: string
+  template_id?: string | null
   node_id?: string | null
-  cpu_cores?: number | null
-  ram_mb?: number | null
-  disk_gb?: number | null
+  cpu_cores: number
+  ram_mb: number
+  disk_gb: number
   tenant_id?: string | null
+  network_id?: string | null
 }
 
 export interface Template {

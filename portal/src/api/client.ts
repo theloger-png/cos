@@ -26,7 +26,18 @@ apiClient.interceptors.response.use(
       window.location.href = '/login'
       return Promise.reject(error)
     }
-    const message = error.response?.data?.detail ?? error.message ?? 'Unknown error'
+    const detail = error.response?.data?.detail
+    let message: string
+    if (Array.isArray(detail)) {
+      message = detail
+        .map((e: { loc?: string[]; msg: string }) => {
+          const field = e.loc?.length ? e.loc[e.loc.length - 1] : null
+          return field ? `${field}: ${e.msg}` : e.msg
+        })
+        .join('; ')
+    } else {
+      message = detail ?? error.message ?? 'Unknown error'
+    }
     return Promise.reject(new Error(message))
   },
 )
