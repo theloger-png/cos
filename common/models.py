@@ -92,6 +92,39 @@ class HeartbeatPayload(BaseModel):
     vm_statuses: dict[str, VMStatus] = Field(default_factory=dict)
 
 
+class DiskInfo(BaseModel):
+    """Disk device attached to a VM as reported by the agent."""
+
+    target: str
+    size_gb: float
+    path: str
+    device: str  # "disk" or "cdrom"
+
+
+class NICInfo(BaseModel):
+    """Network interface attached to a VM.
+
+    vlan_id is populated by the agent via NOS config lookup.
+    network_id / network_name are optionally enriched by the controller.
+    """
+
+    target: str
+    mac: str
+    bridge: str
+    vlan_id: Optional[int] = None
+    network_id: Optional[uuid.UUID] = None
+    network_name: Optional[str] = None
+
+
+class VMHardwareConfig(BaseModel):
+    """Current hardware configuration of a VM as reported by the agent."""
+
+    vcpu: int
+    memory_mb: int
+    disks: list[DiskInfo]
+    nics: list[NICInfo]
+
+
 class AgentCommand(BaseModel):
     """Command sent from controller to agent over WebSocket.
 
