@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import uuid
 from unittest.mock import MagicMock, patch, call
 
@@ -10,6 +11,9 @@ from agent.libvirt_driver import (
     LibvirtDriver,
     _make_cloud_init_user_data,
     _make_cloud_init_meta_data,
+    _mem_to_mib,
+    _disk_size_gb,
+    _vlan_for_iface,
 )
 
 
@@ -404,3 +408,425 @@ class TestCreateVMWithCloudInit:
 
         assert captured, "defineXML should have been called"
         assert "device='cdrom'" not in captured[0]
+
+
+# ---------------------------------------------------------------------------
+# Helper unit tests
+# ---------------------------------------------------------------------------
+
+
+class TestMemToMib:
+    def test_kib(self):
+        assert _mem_to_mib(2097152, "KiB") == 2048
+
+    def test_mib(self):
+        assert _mem_to_mib(2048, "MiB") == 2048
+
+    def test_gib(self):
+        assert _mem_to_mib(2, "GiB") == 2048
+
+    def test_default_kib(self):
+        # unknown unit falls back to KiB
+        assert _mem_to_mib(1024, "unknown") == 1
+
+
+class TestDiskSizeGb:
+    def test_returns_virtual_size_in_gb(self):
+        qemu_output = json.dumps({"virtual-size": 21474836480})  # 20 GiB in bytes
+        mock_result = MagicMock()
+        mock_result.returncode = 0
+        mock_result.stdout = qemu_output
+
+        with patch("os.path.exists", return_value=True), \
+             patch("subprocess.run", return_value=mock_result):
+            size = _disk_size_gb("/some/path.qcow2")
+
+        assert abs(size - 20.0) < 0.1
+
+    def test_returns_zero_when_file_missing(self):
+        with patch("os.path.exists", return_value=False):
+            assert _disk_size_gb("/missing/path.qcow2") == 0.0
+
+    def test_returns_zero_on_qemu_img_failure(self):
+        mock_result = MagicMock()
+        mock_result.returncode = 1
+
+        with patch("os.path.exists", return_value=True), \
+             patch("subprocess.run", return_value=mock_result):
+            assert _disk_size_gb("/bad/path.qcow2") == 0.0
+
+
+class TestVlanForIface:
+    def test_returns_vlan_id_from_scalar_members(self):
+        config = {
+            "interfaces": {
+                "vnet0": {
+                    "unit": {"0": {"family": {"ethernet-switching": {"vlan": {"members": "vlan101"}}}}}
+                }
+            }
+        }
+        assert _vlan_for_iface(config, "vnet0") == 101
+
+    def test_returns_vlan_id_from_list_members(self):
+        config = {
+            "interfaces": {
+                "vnet1": {
+                    "unit": {"0": {"family": {"ethernet-switching": {"vlan": {"members": ["vlan202"]}}}}}
+                }
+            }
+        }
+        assert _vlan_for_iface(config, "vnet1") == 202
+
+    def test_returns_none_when_interface_absent(self):
+        assert _vlan_for_iface({"interfaces": {}}, "vnet99") is None
+
+    def test_returns_none_for_none_config(self):
+        assert _vlan_for_iface(None, "vnet0") is None
+
+    def test_returns_none_on_malformed_config(self):
+        assert _vlan_for_iface({"interfaces": {"vnet0": "bad"}}, "vnet0") is None
+
+
+# ---------------------------------------------------------------------------
+# get_vm_config tests
+# ---------------------------------------------------------------------------
+
+_SAMPLE_DOMAIN_XML = """\
+<domain type='kvm'>
+  <name>test-vm</name>
+  <uuid>abc-123</uuid>
+  <memory unit='KiB'>2097152</memory>
+  <currentMemory unit='KiB'>2097152</currentMemory>
+  <vcpu placement='static'>2</vcpu>
+  <devices>
+    <disk type='file' device='disk'>
+      <driver name='qemu' type='qcow2'/>
+      <source file='/var/lib/cos/vms/abc-123.qcow2'/>
+      <target dev='vda' bus='virtio'/>
+    </disk>
+    <disk type='file' device='cdrom'>
+      <driver name='qemu' type='raw'/>
+      <source file='/var/lib/cos/seeds/abc-123.iso'/>
+      <target dev='hda' bus='ide'/>
+      <readonly/>
+    </disk>
+    <interface type='bridge'>
+      <mac address='52:54:00:11:22:33'/>
+      <source bridge='nos-br'/>
+      <target dev='vnet0'/>
+      <model type='virtio'/>
+    </interface>
+  </devices>
+</domain>
+"""
+
+
+def _mock_domain_for_config(xml: str = _SAMPLE_DOMAIN_XML) -> MagicMock:
+    d = MagicMock()
+    d.XMLDesc.return_value = xml
+    return d
+
+
+class TestGetVmConfig:
+    def _run(self, xml: str = _SAMPLE_DOMAIN_XML, nos_client=None) -> dict:
+        domain = _mock_domain_for_config(xml)
+        conn = MagicMock()
+        conn.lookupByUUIDString.return_value = domain
+        driver = LibvirtDriver(uri="qemu:///system", bridge="nos-br")
+
+        with patch("libvirt.open", return_value=conn), \
+             patch("os.path.exists", return_value=True), \
+             patch("subprocess.run", return_value=MagicMock(returncode=1)):
+            return driver.get_vm_config("abc-123", nos_client)
+
+    def test_returns_vcpu(self):
+        result = self._run()
+        assert result["vcpu"] == 2
+
+    def test_returns_memory_mb(self):
+        result = self._run()
+        assert result["memory_mb"] == 2048  # 2097152 KiB = 2048 MiB
+
+    def test_returns_disks(self):
+        result = self._run()
+        assert any(d["target"] == "vda" and d["device"] == "disk" for d in result["disks"])
+        assert any(d["target"] == "hda" and d["device"] == "cdrom" for d in result["disks"])
+
+    def test_returns_nics(self):
+        result = self._run()
+        assert len(result["nics"]) == 1
+        nic = result["nics"][0]
+        assert nic["target"] == "vnet0"
+        assert nic["mac"] == "52:54:00:11:22:33"
+        assert nic["bridge"] == "nos-br"
+
+    def test_nic_vlan_id_from_nos_client(self):
+        nos_config = {
+            "interfaces": {
+                "vnet0": {
+                    "unit": {"0": {"family": {"ethernet-switching": {"vlan": {"members": "vlan101"}}}}}
+                }
+            }
+        }
+        nos_client = MagicMock()
+        nos_client.get_config.return_value = nos_config
+        result = self._run(nos_client=nos_client)
+        assert result["nics"][0]["vlan_id"] == 101
+
+    def test_nic_vlan_id_none_when_no_nos_client(self):
+        result = self._run(nos_client=None)
+        assert result["nics"][0]["vlan_id"] is None
+
+    def test_disk_size_queried_via_qemu_img(self):
+        qemu_output = json.dumps({"virtual-size": 21474836480})
+        mock_proc = MagicMock()
+        mock_proc.returncode = 0
+        mock_proc.stdout = qemu_output
+
+        domain = _mock_domain_for_config()
+        conn = MagicMock()
+        conn.lookupByUUIDString.return_value = domain
+        driver = LibvirtDriver(uri="qemu:///system", bridge="nos-br")
+
+        with patch("libvirt.open", return_value=conn), \
+             patch("os.path.exists", return_value=True), \
+             patch("subprocess.run", return_value=mock_proc):
+            result = driver.get_vm_config("abc-123")
+
+        vda = next(d for d in result["disks"] if d["target"] == "vda")
+        assert abs(vda["size_gb"] - 20.0) < 0.1
+
+
+# ---------------------------------------------------------------------------
+# apply_vm_config tests
+# ---------------------------------------------------------------------------
+
+
+class TestApplyVmConfigNicRemoval:
+    """NIC removal — live detach + NOS cleanup, no reboot."""
+
+    def _run_remove(self, target="vnet0"):
+        domain = _mock_domain_for_config()
+        domain.state.return_value = (1, 0)  # VIR_DOMAIN_RUNNING = 1
+        conn = MagicMock()
+        conn.lookupByUUIDString.return_value = domain
+        nos_client = MagicMock()
+        nos_client.post_config.return_value = True
+        nos_client.commit.return_value = True
+        driver = LibvirtDriver(uri="qemu:///system", bridge="nos-br")
+
+        with patch("libvirt.open", return_value=conn), \
+             patch("os.path.exists", return_value=True), \
+             patch("subprocess.run", return_value=MagicMock(returncode=1)):
+            # get_vm_config is called at the end too; avoid real libvirt there
+            driver.get_vm_config = MagicMock(return_value={"vcpu": 2, "memory_mb": 2048, "disks": [], "nics": []})
+            driver.apply_vm_config("abc-123", {"remove_nics": [{"target": target}]}, nos_client)
+
+        return domain, nos_client
+
+    def test_detach_called(self):
+        domain, _ = self._run_remove()
+        domain.detachDeviceFlags.assert_called_once()
+
+    def test_nos_delete_called(self):
+        _, nos_client = self._run_remove("vnet0")
+        nos_client.post_config.assert_called_once()
+        call_args = nos_client.post_config.call_args[0][0]
+        assert any("delete interfaces vnet0" in c for c in call_args)
+
+    def test_nos_commit_called(self):
+        _, nos_client = self._run_remove()
+        nos_client.commit.assert_called_once()
+
+    def test_no_shutdown_for_nic_only_removal(self):
+        domain, _ = self._run_remove()
+        domain.shutdown.assert_not_called()
+
+
+class TestApplyVmConfigNicAddition:
+    """NIC addition — live attach + NOS VLAN provisioning, no reboot."""
+
+    def _build_domain(self, before_xml=_SAMPLE_DOMAIN_XML):
+        """Domain that returns updated XML after attachDeviceFlags is called."""
+        after_xml = before_xml.replace(
+            "<target dev='vnet0'/>",
+            "<target dev='vnet0'/></interface>\n    <interface type='bridge'>"
+            "<mac address='52:54:00:aa:bb:cc'/><source bridge='nos-br'/>"
+            "<target dev='vnet1'/><model type='virtio'/>",
+        )
+        call_count = [0]
+        domain = MagicMock()
+        domain.state.return_value = (1, 0)  # running
+
+        def _xmldesc(flags=0):
+            return after_xml if call_count[0] > 0 else before_xml
+
+        def _attach(xml, flags):
+            call_count[0] += 1
+
+        domain.XMLDesc.side_effect = _xmldesc
+        domain.attachDeviceFlags.side_effect = _attach
+        return domain
+
+    def test_attach_called(self):
+        domain = self._build_domain()
+        conn = MagicMock()
+        conn.lookupByUUIDString.return_value = domain
+        nos_client = MagicMock()
+        nos_client.post_config.return_value = True
+        nos_client.commit.return_value = True
+        driver = LibvirtDriver(uri="qemu:///system", bridge="nos-br")
+        driver.get_vm_config = MagicMock(return_value={"vcpu": 2, "memory_mb": 2048, "disks": [], "nics": []})
+
+        with patch("libvirt.open", return_value=conn), \
+             patch("os.path.exists", return_value=True), \
+             patch("subprocess.run", return_value=MagicMock(returncode=1)):
+            driver.apply_vm_config("abc-123", {"add_nics": [{"vlan_id": 101}]}, nos_client)
+
+        domain.attachDeviceFlags.assert_called_once()
+
+    def test_nos_vlan_provisioned(self):
+        domain = self._build_domain()
+        conn = MagicMock()
+        conn.lookupByUUIDString.return_value = domain
+        nos_client = MagicMock()
+        nos_client.post_config.return_value = True
+        nos_client.commit.return_value = True
+        driver = LibvirtDriver(uri="qemu:///system", bridge="nos-br")
+        driver.get_vm_config = MagicMock(return_value={"vcpu": 2, "memory_mb": 2048, "disks": [], "nics": []})
+
+        with patch("libvirt.open", return_value=conn), \
+             patch("os.path.exists", return_value=True), \
+             patch("subprocess.run", return_value=MagicMock(returncode=1)):
+            driver.apply_vm_config("abc-123", {"add_nics": [{"vlan_id": 101}]}, nos_client)
+
+        nos_client.post_config.assert_called_once()
+        cmds = nos_client.post_config.call_args[0][0]
+        assert any("vlan members vlan101" in c for c in cmds)
+        nos_client.commit.assert_called_once()
+
+    def test_no_shutdown_for_nic_only_addition(self):
+        domain = self._build_domain()
+        conn = MagicMock()
+        conn.lookupByUUIDString.return_value = domain
+        nos_client = MagicMock()
+        nos_client.post_config.return_value = True
+        nos_client.commit.return_value = True
+        driver = LibvirtDriver(uri="qemu:///system", bridge="nos-br")
+        driver.get_vm_config = MagicMock(return_value={"vcpu": 2, "memory_mb": 2048, "disks": [], "nics": []})
+
+        with patch("libvirt.open", return_value=conn), \
+             patch("os.path.exists", return_value=True), \
+             patch("subprocess.run", return_value=MagicMock(returncode=1)):
+            driver.apply_vm_config("abc-123", {"add_nics": [{"vlan_id": 101}]}, nos_client)
+
+        domain.shutdown.assert_not_called()
+
+
+class TestApplyVmConfigVcpuMemory:
+    """vcpu/memory changes trigger shutdown + redefine + start."""
+
+    def _run_vcpu_memory(self, new_vcpu=4, new_mem=4096):
+        domain = _mock_domain_for_config()
+        domain.state.side_effect = [
+            (1, 0),   # initial state check → running
+            (5, 0),   # shutdown poll → shutoff
+        ]
+        domain.XMLDesc.return_value = _SAMPLE_DOMAIN_XML
+
+        new_domain = MagicMock()
+        conn = MagicMock()
+        conn.lookupByUUIDString.return_value = domain
+        conn.defineXML.return_value = new_domain
+
+        driver = LibvirtDriver(uri="qemu:///system", bridge="nos-br")
+        driver.get_vm_config = MagicMock(return_value={"vcpu": new_vcpu, "memory_mb": new_mem, "disks": [], "nics": []})
+
+        with patch("libvirt.open", return_value=conn), \
+             patch("os.path.exists", return_value=True), \
+             patch("subprocess.run", return_value=MagicMock(returncode=1)), \
+             patch("time.sleep"):
+            driver.apply_vm_config("abc-123", {"vcpu": new_vcpu, "memory_mb": new_mem})
+
+        return conn, domain, new_domain
+
+    def test_shutdown_called(self):
+        _, domain, _ = self._run_vcpu_memory()
+        domain.shutdown.assert_called_once()
+
+    def test_define_xml_called(self):
+        conn, _, _ = self._run_vcpu_memory()
+        conn.defineXML.assert_called_once()
+
+    def test_new_xml_has_updated_vcpu(self):
+        conn, _, _ = self._run_vcpu_memory(new_vcpu=4)
+        xml_arg = conn.defineXML.call_args[0][0]
+        assert "<vcpu" in xml_arg and ">4<" in xml_arg
+
+    def test_new_xml_has_updated_memory_kib(self):
+        conn, _, _ = self._run_vcpu_memory(new_mem=4096)
+        xml_arg = conn.defineXML.call_args[0][0]
+        # 4096 MiB × 1024 = 4194304 KiB
+        assert "4194304" in xml_arg
+
+    def test_domain_started_after_redefine(self):
+        _, _, new_domain = self._run_vcpu_memory()
+        new_domain.create.assert_called_once()
+
+
+class TestApplyVmConfigDiskAdd:
+    """Disk addition creates file, adds to XML, triggers reboot."""
+
+    def test_qemu_img_create_called(self):
+        domain = _mock_domain_for_config()
+        domain.state.side_effect = [(1, 0), (5, 0)]
+        domain.XMLDesc.return_value = _SAMPLE_DOMAIN_XML
+
+        new_domain = MagicMock()
+        conn = MagicMock()
+        conn.lookupByUUIDString.return_value = domain
+        conn.defineXML.return_value = new_domain
+
+        driver = LibvirtDriver(uri="qemu:///system", bridge="nos-br")
+        driver.get_vm_config = MagicMock(return_value={"vcpu": 2, "memory_mb": 2048, "disks": [], "nics": []})
+
+        qemu_mock = MagicMock()
+        qemu_mock.returncode = 0
+
+        with patch("libvirt.open", return_value=conn), \
+             patch("os.makedirs"), \
+             patch("os.path.exists", return_value=True), \
+             patch("subprocess.run", return_value=qemu_mock) as mock_run, \
+             patch("time.sleep"):
+            driver.apply_vm_config("abc-123", {"add_disks": [{"size_gb": 20}]})
+
+        # subprocess.run should have been called at least for qemu-img create
+        calls = [str(c) for c in mock_run.call_args_list]
+        assert any("qemu-img" in c and "create" in c for c in calls)
+
+    def test_new_xml_contains_new_disk_target(self):
+        domain = _mock_domain_for_config()
+        domain.state.side_effect = [(1, 0), (5, 0)]
+        domain.XMLDesc.return_value = _SAMPLE_DOMAIN_XML
+
+        new_domain = MagicMock()
+        conn = MagicMock()
+        conn.lookupByUUIDString.return_value = domain
+        conn.defineXML.return_value = new_domain
+
+        driver = LibvirtDriver(uri="qemu:///system", bridge="nos-br")
+        driver.get_vm_config = MagicMock(return_value={"vcpu": 2, "memory_mb": 2048, "disks": [], "nics": []})
+
+        qemu_mock = MagicMock()
+        qemu_mock.returncode = 0
+
+        with patch("libvirt.open", return_value=conn), \
+             patch("os.makedirs"), \
+             patch("os.path.exists", return_value=True), \
+             patch("subprocess.run", return_value=qemu_mock), \
+             patch("time.sleep"):
+            driver.apply_vm_config("abc-123", {"add_disks": [{"size_gb": 20}]})
+
+        xml_arg = conn.defineXML.call_args[0][0]
+        # vda already exists in sample XML, next should be vdb
+        assert "vdb" in xml_arg
