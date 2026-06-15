@@ -229,6 +229,42 @@ class TestCreateNetworkBroadcast:
 # delete_network broadcast tests
 # ---------------------------------------------------------------------------
 
+class TestNetworkCidrGatewayOptional:
+    @pytest.mark.asyncio
+    async def test_create_network_without_cidr_gateway_returns_201_with_nulls(self):
+        from controller.api.routers.networks import create_network, NetworkCreate
+
+        tenant = _make_tenant()
+        session = _session_with_nodes([_make_node()])
+
+        body = NetworkCreate(name="l2-net", vlan_id=200)
+
+        with patch("controller.api.routers.networks._agent_client") as mock_agent:
+            mock_agent.send_command = AsyncMock(return_value=_ok_result())
+            result = await create_network(body=body, session=session, auth=(None, tenant))
+
+        assert result.vlan_id == 200
+        assert result.cidr is None
+        assert result.gateway is None
+
+    @pytest.mark.asyncio
+    async def test_create_network_with_cidr_gateway_unchanged(self):
+        from controller.api.routers.networks import create_network, NetworkCreate
+
+        tenant = _make_tenant()
+        session = _session_with_nodes([_make_node()])
+
+        body = NetworkCreate(name="full-net", vlan_id=100, cidr="10.0.0.0/24", gateway="10.0.0.1")
+
+        with patch("controller.api.routers.networks._agent_client") as mock_agent:
+            mock_agent.send_command = AsyncMock(return_value=_ok_result())
+            result = await create_network(body=body, session=session, auth=(None, tenant))
+
+        assert result.vlan_id == 100
+        assert result.cidr == "10.0.0.0/24"
+        assert result.gateway == "10.0.0.1"
+
+
 class TestDeleteNetworkBroadcast:
     @pytest.mark.asyncio
     async def test_broadcasts_remove_vlan_to_online_nodes(self):

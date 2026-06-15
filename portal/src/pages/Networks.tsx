@@ -117,13 +117,17 @@ export function Networks() {
                 <Input type="number" min={1} max={4094} value={vlanId} onChange={(e) => setVlanId(e.target.value)} placeholder="100" />
               </div>
               <div className="space-y-2">
-                <Label>CIDR</Label>
+                <Label>CIDR <span className="text-[var(--muted-foreground)] font-normal">(optional)</span></Label>
                 <Input value={cidr} onChange={(e) => setCidr(e.target.value)} placeholder="10.100.0.0/24" />
               </div>
               <div className="space-y-2">
-                <Label>Gateway</Label>
+                <Label>Gateway <span className="text-[var(--muted-foreground)] font-normal">(optional)</span></Label>
                 <Input value={gateway} onChange={(e) => setGateway(e.target.value)} placeholder="10.100.0.1" />
               </div>
+              <p className="text-xs text-[var(--muted-foreground)]">
+                Optional — for your own reference when assigning static IPs inside VMs. COS does not configure routing
+                or DHCP for this network (L2 only).
+              </p>
             </div>
             {createNetwork.error && (
               <p className="text-sm text-red-400 mb-3">{createNetwork.error.message}</p>

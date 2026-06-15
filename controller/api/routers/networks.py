@@ -26,8 +26,8 @@ class NetworkCreate(BaseModel):
     name: str
     tenant_id: uuid.UUID | None = None  # required when caller is admin; ignored for tenant-scoped callers
     vlan_id: int
-    cidr: str
-    gateway: str
+    cidr: str | None = None
+    gateway: str | None = None
 
 
 class NetworkCreateResponse(NetworkInfo):

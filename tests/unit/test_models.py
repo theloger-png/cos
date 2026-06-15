@@ -158,6 +158,7 @@ class TestVMTemplate:
             disk_gb=20,
             os_type="linux",
             image_path="/images/ubuntu-22.04.qcow2",
+            created_at=_now(),
         )
         assert tpl.os_type == "linux"
 
@@ -171,8 +172,21 @@ class TestNetworkInfo:
             vlan_id=100,
             cidr="10.10.0.0/24",
             gateway="10.10.0.1",
+            created_at=_now(),
         )
         assert net.vlan_id == 100
+        assert net.cidr == "10.10.0.0/24"
+
+    def test_valid_l2_only(self):
+        net = NetworkInfo(
+            id=_uuid(),
+            tenant_id=_uuid(),
+            name="l2-net",
+            vlan_id=200,
+            created_at=_now(),
+        )
+        assert net.cidr is None
+        assert net.gateway is None
 
 
 class TestTenantInfo:

@@ -77,8 +77,8 @@ class NetworkInfo(BaseModel):
     tenant_id: uuid.UUID
     name: str
     vlan_id: int
-    cidr: str
-    gateway: str
+    cidr: str | None = None
+    gateway: str | None = None
     created_at: datetime
 
 
