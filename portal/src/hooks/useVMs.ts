@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { createVM, deleteVM, getVMs, migrateVM, startVM, stopVM } from '@/api/vms'
-import type { VMCreateRequest, VMCreateResponse } from '@/types'
+import { applyVMHardware, createVM, deleteVM, getVMHardware, getVMs, migrateVM, startVM, stopVM } from '@/api/vms'
+import type { VMCreateRequest, VMCreateResponse, VMHardwareChanges } from '@/types'
 
 export function useVMs() {
   return useQuery({
@@ -50,6 +50,25 @@ export function useMigrateVM() {
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['vms'] })
       qc.invalidateQueries({ queryKey: ['nodes'] })
+    },
+  })
+}
+
+export function useVMHardware(vmId: string) {
+  return useQuery({
+    queryKey: ['vm-hardware', vmId],
+    queryFn: () => getVMHardware(vmId),
+    enabled: !!vmId,
+  })
+}
+
+export function useApplyVMHardware(vmId: string) {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (changes: VMHardwareChanges) => applyVMHardware(vmId, changes),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['vm-hardware', vmId] })
+      qc.invalidateQueries({ queryKey: ['vms'] })
     },
   })
 }

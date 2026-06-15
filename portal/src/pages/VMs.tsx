@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { Plus, Play, Square, Trash2, ArrowRightLeft } from 'lucide-react'
+import { Plus, Play, Square, Trash2, ArrowRightLeft, Settings2 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
@@ -127,6 +127,14 @@ export function VMs() {
                             <Square className="h-3.5 w-3.5 text-yellow-400" />
                           </Button>
                         )}
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          title="Edit Hardware"
+                          onClick={() => navigate(`/vms/${vm.id}/hardware`)}
+                        >
+                          <Settings2 className="h-3.5 w-3.5" />
+                        </Button>
                         <Button
                           variant="ghost"
                           size="icon"

@@ -1,4 +1,4 @@
-import type { VM, VMCreateRequest, VMCreateResponse } from '@/types'
+import type { VM, VMCreateRequest, VMCreateResponse, VMHardwareConfig, VMHardwareChanges } from '@/types'
 import client from './client'
 
 export async function getVMs(): Promise<VM[]> {
@@ -32,5 +32,15 @@ export async function deleteVM(id: string): Promise<void> {
 
 export async function migrateVM(id: string, targetNodeId: string): Promise<VM> {
   const { data } = await client.post<VM>(`/api/v1/vms/${id}/migrate`, { target_node_id: targetNodeId })
+  return data
+}
+
+export async function getVMHardware(id: string): Promise<VMHardwareConfig> {
+  const { data } = await client.get<VMHardwareConfig>(`/api/v1/vms/${id}/hardware`)
+  return data
+}
+
+export async function applyVMHardware(id: string, changes: VMHardwareChanges): Promise<VMHardwareConfig> {
+  const { data } = await client.put<VMHardwareConfig>(`/api/v1/vms/${id}/hardware`, changes)
   return data
 }

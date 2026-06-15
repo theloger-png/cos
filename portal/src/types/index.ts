@@ -109,3 +109,34 @@ export interface PaginatedResponse<T> {
   page: number
   size: number
 }
+
+export interface DiskInfo {
+  target: string
+  size_gb: number
+  path: string
+  device: string  // "disk" | "cdrom"
+}
+
+export interface NICInfo {
+  target: string
+  mac: string
+  bridge: string
+  vlan_id: number | null
+  network_id: string | null
+  network_name: string | null
+}
+
+export interface VMHardwareConfig {
+  vcpu: number
+  memory_mb: number
+  disks: DiskInfo[]
+  nics: NICInfo[]
+}
+
+export interface VMHardwareChanges {
+  vcpu?: number | null
+  memory_mb?: number | null
+  add_disks: { size_gb: number }[]
+  add_nics: { network_id: string }[]
+  remove_nics: { target: string }[]
+}

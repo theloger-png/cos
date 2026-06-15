@@ -7,6 +7,7 @@ import { Nodes } from '@/pages/Nodes'
 import { NodeDetail } from '@/pages/NodeDetail'
 import { VMs } from '@/pages/VMs'
 import { VMCreate } from '@/pages/VMCreate'
+import { VMHardware } from '@/pages/VMHardware'
 import { Templates } from '@/pages/Templates'
 import { Networks } from '@/pages/Networks'
 import { Tenants } from '@/pages/Tenants'
@@ -46,6 +47,7 @@ function App() {
             <Route path="/nodes/:id" element={<NodeDetail />} />
             <Route path="/vms" element={<VMs />} />
             <Route path="/vms/create" element={<VMCreate />} />
+            <Route path="/vms/:id/hardware" element={<VMHardware />} />
             <Route path="/templates" element={<Templates />} />
             <Route path="/networks" element={<Networks />} />
             <Route path="/tenants" element={<Tenants />} />
