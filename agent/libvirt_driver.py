@@ -14,11 +14,17 @@ logger = logging.getLogger(__name__)
 
 _DISK_BASE_DIR = "/var/lib/cos/vms"
 
+_NOS_METADATA_BLOCK = (
+    "  <metadata>\n"
+    "    <nos:vlan xmlns:nos=\"https://github.com/theloger-png/nos\">{vlan_id}</nos:vlan>\n"
+    "  </metadata>\n"
+)
+
 _DOMAIN_XML_TEMPLATE = """\
 <domain type='kvm'>
   <name>{name}</name>
   <uuid>{uuid}</uuid>
-  <memory unit='MiB'>{ram_mb}</memory>
+{metadata_block}  <memory unit='MiB'>{ram_mb}</memory>
   <currentMemory unit='MiB'>{ram_mb}</currentMemory>
   <vcpu>{cpu_cores}</vcpu>
   <os>
@@ -69,6 +75,7 @@ class LibvirtDriver:
         ram_mb: int,
         disk_gb: int,
         image_path: str,
+        vlan_id: int | None = None,
     ) -> str:
         """Define and start a new KVM domain, returning its libvirt UUID."""
         domain_uuid = str(uuid.uuid4())
@@ -81,6 +88,9 @@ class LibvirtDriver:
             # Create a blank qcow2 disk using qemu-img
             os.system(f"qemu-img create -f qcow2 {disk_path} {disk_gb}G")
 
+        metadata_block = (
+            _NOS_METADATA_BLOCK.format(vlan_id=vlan_id) if vlan_id is not None else ""
+        )
         xml = _DOMAIN_XML_TEMPLATE.format(
             name=name,
             uuid=domain_uuid,
@@ -88,6 +98,7 @@ class LibvirtDriver:
             cpu_cores=cpu_cores,
             disk_path=disk_path,
             bridge=self._bridge,
+            metadata_block=metadata_block,
         )
 
         conn = self._connect()

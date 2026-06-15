@@ -113,6 +113,47 @@ class TestCreateVM:
         assert "<source bridge='custom-br0'/>" in xml
 
 
+class TestCreateVMVlan:
+    def _captured_xml(self, driver, **kwargs) -> str:
+        domain = _mock_domain()
+        conn = _mock_conn()
+        captured: list[str] = []
+
+        def capture_define(xml: str):
+            captured.append(xml)
+            return domain
+
+        conn.defineXML.side_effect = capture_define
+
+        with patch("libvirt.open", return_value=conn), \
+             patch("os.makedirs"), \
+             patch("os.path.exists", return_value=False), \
+             patch("os.system"):
+            driver.create_vm("vm-vlan", 2, 2048, 20, "", **kwargs)
+
+        return captured[0]
+
+    def test_with_vlan_id_adds_nos_metadata(self, driver):
+        xml = self._captured_xml(driver, vlan_id=200)
+        assert "<metadata>" in xml
+        assert 'xmlns:nos="https://github.com/theloger-png/nos"' in xml
+        assert "<nos:vlan" in xml
+        assert ">200<" in xml
+
+    def test_vlan_id_value_is_correct(self, driver):
+        xml = self._captured_xml(driver, vlan_id=42)
+        assert ">42<" in xml
+
+    def test_without_vlan_id_no_metadata_block(self, driver):
+        xml = self._captured_xml(driver)
+        assert "<metadata>" not in xml
+        assert "<nos:vlan" not in xml
+
+    def test_vlan_id_none_no_metadata_block(self, driver):
+        xml = self._captured_xml(driver, vlan_id=None)
+        assert "<metadata>" not in xml
+
+
 class TestStartVM:
     def test_success(self, driver):
         conn = _mock_conn()

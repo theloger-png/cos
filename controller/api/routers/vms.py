@@ -8,7 +8,7 @@ import uuid
 from common.models import VMInfo, VMStatus
 from controller.agent_client.client import AgentClient
 from controller.api.deps import current_auth, db_session
-from controller.db.models import APIKey, Node, Tenant, VM, VMTemplate
+from controller.db.models import APIKey, Network, Node, Tenant, VM, VMTemplate
 from controller.scheduler.scheduler import Scheduler
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
@@ -25,6 +25,7 @@ class VMCreate(BaseModel):
     tenant_id: uuid.UUID | None = None  # required when caller is admin; ignored for tenant-scoped callers
     template_id: uuid.UUID | None = None
     node_id: uuid.UUID | None = None
+    network_id: uuid.UUID | None = None  # optional; resolved to vlan_id sent to agent
     cpu_cores: int
     ram_mb: int
     disk_gb: int
@@ -114,6 +115,17 @@ async def create_vm(
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Tenant not found")
     effective_tenant_id = tenant.id
 
+    vlan_id: int | None = None
+    if body.network_id:
+        net_q = select(Network).where(Network.id == body.network_id)
+        if auth[1] is not None:  # tenant caller: scope to their tenant
+            net_q = net_q.where(Network.tenant_id == effective_tenant_id)
+        net_result = await session.execute(net_q)
+        network = net_result.scalar_one_or_none()
+        if network is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Network not found")
+        vlan_id = network.vlan_id
+
     image_path = ""
     if body.template_id:
         tpl_result = await session.execute(select(VMTemplate).where(VMTemplate.id == body.template_id))
@@ -151,17 +163,16 @@ async def create_vm(
     await session.flush()
 
     agent = AgentClient()
-    result = await agent.send_command(
-        node.ip_address,
-        "vm_create",
-        {
-            "name": vm.name,
-            "cpu_cores": vm.cpu_cores,
-            "ram_mb": vm.ram_mb,
-            "disk_gb": vm.disk_gb,
-            "image_path": image_path,
-        },
-    )
+    vm_create_payload: dict = {
+        "name": vm.name,
+        "cpu_cores": vm.cpu_cores,
+        "ram_mb": vm.ram_mb,
+        "disk_gb": vm.disk_gb,
+        "image_path": image_path,
+    }
+    if vlan_id is not None:
+        vm_create_payload["vlan_id"] = vlan_id
+    result = await agent.send_command(node.ip_address, "vm_create", vm_create_payload)
     if result.success:
         vm.libvirt_uuid = result.output.strip()
         vm.status = VMStatus.running.value

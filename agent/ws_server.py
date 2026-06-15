@@ -36,6 +36,7 @@ async def _dispatch(command: AgentCommand) -> AgentCommandResult:
                 ram_mb=p["ram_mb"],
                 disk_gb=p["disk_gb"],
                 image_path=p.get("image_path", ""),
+                vlan_id=p.get("vlan_id"),
             )
             return AgentCommandResult(success=True, output=libvirt_uuid)
 

@@ -92,6 +92,12 @@ class HeartbeatPayload(BaseModel):
 
 
 class AgentCommand(BaseModel):
+    """Command sent from controller to agent over WebSocket.
+
+    vm_create payload keys: name, cpu_cores, ram_mb, disk_gb, image_path,
+    vlan_id (optional int — omit to let nos-libvirt-hook default to VLAN 115).
+    """
+
     command: str
     payload: dict = Field(default_factory=dict)
 
