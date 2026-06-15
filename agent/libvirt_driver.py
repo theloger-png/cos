@@ -482,6 +482,8 @@ class LibvirtDriver:
         new_memory_mb: int | None = changes.get("memory_mb")
         needs_reboot = bool(new_vcpu or new_memory_mb or add_disks)
 
+        nic_failures: list[dict] = []
+
         conn = self._connect()
         try:
             domain = conn.lookupByUUIDString(libvirt_uuid)
@@ -491,25 +493,51 @@ class LibvirtDriver:
                 target_name = nic.get("target", "")
                 if not target_name:
                     continue
+
+                # Extract MAC from live XML to build a minimal detach fragment.
                 xml_str = domain.XMLDesc(0)
                 root = ET.fromstring(xml_str)
+                mac_address: str | None = None
                 for iface_elem in root.findall(".//interface"):
                     t = iface_elem.find("target")
                     if t is None or t.get("dev") != target_name:
                         continue
-                    iface_xml = ET.tostring(iface_elem, encoding="unicode")
-                    state, _ = domain.state()
-                    flags = libvirt.VIR_DOMAIN_AFFECT_CONFIG
-                    if state == libvirt.VIR_DOMAIN_RUNNING:
-                        flags |= libvirt.VIR_DOMAIN_AFFECT_LIVE
-                    try:
-                        domain.detachDeviceFlags(iface_xml, flags)
-                    except libvirt.libvirtError as exc:
-                        logger.warning("detach NIC %s failed: %s", target_name, exc)
+                    mac_elem = iface_elem.find("mac")
+                    if mac_elem is not None:
+                        mac_address = mac_elem.get("address", "")
                     break
 
-                # NOS cleanup — idempotent even if the interface is already gone
-                if nos_client is not None:
+                if mac_address is None:
+                    reason = f"NIC {target_name} not found in domain XML"
+                    logger.warning(reason)
+                    nic_failures.append({"target": target_name, "reason": reason})
+                    continue
+
+                # Minimal XML avoids <address>/<alias> PCI mismatch on detach.
+                detach_xml = (
+                    f"<interface type='bridge'>"
+                    f"<mac address='{mac_address}'/>"
+                    f"<source bridge='{self._bridge}'/>"
+                    f"<model type='virtio'/>"
+                    f"</interface>"
+                )
+
+                state, _ = domain.state()
+                flags = libvirt.VIR_DOMAIN_AFFECT_CONFIG
+                if state == libvirt.VIR_DOMAIN_RUNNING:
+                    flags |= libvirt.VIR_DOMAIN_AFFECT_LIVE
+
+                detach_ok = False
+                try:
+                    domain.detachDeviceFlags(detach_xml, flags)
+                    detach_ok = True
+                except libvirt.libvirtError as exc:
+                    reason = str(exc)
+                    logger.warning("detach NIC %s failed: %s", target_name, reason)
+                    nic_failures.append({"target": target_name, "reason": reason})
+
+                # NOS cleanup only when the detach actually succeeded.
+                if detach_ok and nos_client is not None:
                     nos_client.post_config([f"delete interfaces {target_name}"])
                     nos_client.commit()
 
@@ -541,7 +569,12 @@ class LibvirtDriver:
                 try:
                     domain.attachDeviceFlags(nic_xml, flags)
                 except libvirt.libvirtError as exc:
-                    logger.error("attach NIC (vlan=%s) failed: %s", vlan_id, exc)
+                    reason = str(exc)
+                    logger.error("attach NIC (vlan=%s) failed: %s", vlan_id, reason)
+                    nic_failures.append({
+                        "target": f"new-nic (vlan {vlan_id})",
+                        "reason": reason,
+                    })
                     continue
 
                 # Provision NOS only when the VM is running and vnetX is assigned
@@ -655,4 +688,6 @@ class LibvirtDriver:
         finally:
             conn.close()
 
-        return self.get_vm_config(libvirt_uuid, nos_client)
+        result = self.get_vm_config(libvirt_uuid, nos_client)
+        result["nic_failures"] = nic_failures
+        return result

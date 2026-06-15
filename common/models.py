@@ -116,6 +116,13 @@ class NICInfo(BaseModel):
     network_name: Optional[str] = None
 
 
+class NICFailure(BaseModel):
+    """A NIC operation that failed during apply_vm_config."""
+
+    target: str
+    reason: str
+
+
 class VMHardwareConfig(BaseModel):
     """Current hardware configuration of a VM as reported by the agent."""
 
@@ -123,6 +130,7 @@ class VMHardwareConfig(BaseModel):
     memory_mb: int
     disks: list[DiskInfo]
     nics: list[NICInfo]
+    nic_failures: list[NICFailure] = Field(default_factory=list)
 
 
 class AgentCommand(BaseModel):
