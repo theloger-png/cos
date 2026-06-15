@@ -44,6 +44,11 @@ export interface VMCreateRequest {
   network_id?: string | null
 }
 
+export interface VMCreateResponse extends VM {
+  cloud_init_user: string | null
+  cloud_init_password: string | null
+}
+
 export interface Template {
   id: string
   name: string
@@ -51,6 +56,7 @@ export interface Template {
   ram_mb: number
   disk_gb: number
   description: string | null
+  cloud_init_user: string
   created_at: string
   updated_at: string
 }
@@ -61,6 +67,7 @@ export interface TemplateCreateRequest {
   ram_mb: number
   disk_gb: number
   description?: string
+  cloud_init_user?: string
 }
 
 export interface Network {

@@ -26,9 +26,10 @@ export function Templates() {
   const [ram, setRam] = useState('2048')
   const [disk, setDisk] = useState('20')
   const [description, setDescription] = useState('')
+  const [cloudInitUser, setCloudInitUser] = useState('ubuntu')
 
   const resetForm = () => {
-    setName(''); setCpu('2'); setRam('2048'); setDisk('20'); setDescription('')
+    setName(''); setCpu('2'); setRam('2048'); setDisk('20'); setDescription(''); setCloudInitUser('ubuntu')
   }
 
   const handleCreate = (e: React.FormEvent) => {
@@ -40,6 +41,7 @@ export function Templates() {
         ram_mb: parseInt(ram),
         disk_gb: parseInt(disk),
         description: description || undefined,
+        cloud_init_user: cloudInitUser || 'ubuntu',
       },
       {
         onSuccess: () => {
@@ -73,6 +75,7 @@ export function Templates() {
                 <TableHead>CPU</TableHead>
                 <TableHead>RAM</TableHead>
                 <TableHead>Disk</TableHead>
+                <TableHead>Cloud-init user</TableHead>
                 <TableHead>Description</TableHead>
                 <TableHead>Created</TableHead>
                 <TableHead>Actions</TableHead>
@@ -81,7 +84,7 @@ export function Templates() {
             <TableBody>
               {templates.length === 0 ? (
                 <TableRow>
-                  <TableCell colSpan={7} className="text-center text-[var(--muted-foreground)] py-10">
+                  <TableCell colSpan={8} className="text-center text-[var(--muted-foreground)] py-10">
                     No templates yet
                   </TableCell>
                 </TableRow>
@@ -92,6 +95,7 @@ export function Templates() {
                     <TableCell>{t.cpu_cores} cores</TableCell>
                     <TableCell>{t.ram_mb >= 1024 ? `${t.ram_mb / 1024} GB` : `${t.ram_mb} MB`}</TableCell>
                     <TableCell>{t.disk_gb} GB</TableCell>
+                    <TableCell className="font-mono text-sm">{t.cloud_init_user}</TableCell>
                     <TableCell className="text-[var(--muted-foreground)] text-sm">{t.description ?? '—'}</TableCell>
                     <TableCell className="text-[var(--muted-foreground)] text-sm">
                       {formatDate(t.created_at)}
@@ -137,6 +141,14 @@ export function Templates() {
                   <Label>Disk (GB)</Label>
                   <Input type="number" min={1} value={disk} onChange={(e) => setDisk(e.target.value)} />
                 </div>
+              </div>
+              <div className="space-y-2">
+                <Label>Cloud-init username</Label>
+                <Input
+                  value={cloudInitUser}
+                  onChange={(e) => setCloudInitUser(e.target.value)}
+                  placeholder="ubuntu"
+                />
               </div>
               <div className="space-y-2">
                 <Label>Description</Label>

@@ -23,6 +23,7 @@ class TemplateCreate(BaseModel):
     disk_gb: int
     os_type: str
     image_path: str
+    cloud_init_user: str = "ubuntu"
 
 
 def _tpl_to_schema(t: VMTemplate) -> VMTemplateSchema:
@@ -35,6 +36,7 @@ def _tpl_to_schema(t: VMTemplate) -> VMTemplateSchema:
         disk_gb=t.disk_gb,
         os_type=t.os_type,
         image_path=t.image_path,
+        cloud_init_user=t.cloud_init_user,
         created_at=t.created_at,
     )
 
@@ -64,6 +66,7 @@ async def create_template(
         disk_gb=body.disk_gb,
         os_type=body.os_type,
         image_path=body.image_path,
+        cloud_init_user=body.cloud_init_user,
     )
     session.add(tpl)
     await session.commit()
