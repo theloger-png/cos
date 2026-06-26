@@ -277,6 +277,13 @@ class LibvirtDriver:
 
         if image_path and os.path.exists(image_path):
             shutil.copy2(image_path, disk_path)
+            result = subprocess.run(
+                ["qemu-img", "resize", disk_path, f"{disk_gb}G"],
+                capture_output=True,
+                text=True,
+            )
+            if result.returncode != 0:
+                logger.error("qemu-img resize failed for %s: %s", disk_path, result.stderr)
         else:
             # Create a blank qcow2 disk using qemu-img
             os.system(f"qemu-img create -f qcow2 {disk_path} {disk_gb}G")
