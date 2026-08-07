@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import logging
 import os
-import re
 import shutil
 import subprocess
 import tempfile
@@ -15,9 +14,6 @@ import xml.etree.ElementTree as ET
 
 import libvirt
 import psutil
-
-# Preserve the NOS namespace prefix when round-tripping domain XML through ElementTree.
-ET.register_namespace("nos", "https://github.com/theloger-png/nos")
 
 logger = logging.getLogger(__name__)
 
@@ -62,81 +58,11 @@ def _disk_size_gb(path: str) -> float:
     return 0.0
 
 
-def _vlan_for_iface(nos_config: dict | None, target: str) -> int | None:
-    """Parse a NOS GET /api/v1/config response to find the VLAN for *target*.
-
-    Handles both scalar members ("vlan101") and list members (["vlan101"]).
-    Returns None when the interface or VLAN cannot be determined.
-    """
-    if not nos_config or not target:
-        return None
-    try:
-        iface = nos_config.get("interfaces", {}).get(target, {})
-        members = (
-            iface.get("unit", {})
-            .get("0", {})
-            .get("family", {})
-            .get("ethernet-switching", {})
-            .get("vlan", {})
-            .get("members")
-        )
-        if isinstance(members, list) and members:
-            members = members[0]
-        if isinstance(members, str) and members.startswith("vlan"):
-            return int(members[4:])
-    except (KeyError, ValueError, TypeError, AttributeError):
-        pass
-    return None
-
-_VLAN_MEMBERS_RE = re.compile(
-    r"set\s+interfaces\s+(\S+)\s+unit\s+\d+\s+family\s+ethernet-switching"
-    r"\s+vlan\s+members\s+\"?(\d+)\"?"
-)
-
-
-def _parse_vlan_map(nos_response: dict | None) -> dict[str, int]:
-    """Parse a NOS GET /api/v1/config response into an {ifname: vlan_id} mapping.
-
-    The response contains a list of JunOS-style set-command strings under the key
-    "commands".  Only lines matching the ethernet-switching vlan members pattern
-    are processed; all other lines are ignored.
-
-    Tolerances:
-    - Quoted or unquoted numeric VLAN IDs (``vlan members 111`` and
-      ``vlan members "111"`` are both accepted).
-    - Interface names with a unit suffix (``vnet9.0``) are normalised to their
-      base name (``vnet9``) before insertion into the map.
-    - When the same interface appears more than once, the *last* matching line
-      wins (mirrors how NOS overwrites the same config leaf on repeated set
-      commands).
-
-    Returns an empty dict when *nos_response* is None, missing the "commands"
-    key, or contains no matching lines.
-    """
-    if not nos_response:
-        return {}
-    commands = nos_response.get("commands", [])
-    if not isinstance(commands, list):
-        return {}
-    vlan_map: dict[str, int] = {}
-    for cmd in commands:
-        if not isinstance(cmd, str):
-            continue
-        m = _VLAN_MEMBERS_RE.search(cmd)
-        if not m:
-            continue
-        ifname = m.group(1).split(".")[0]  # strip ".0" unit suffix if present
-        try:
-            vlan_map[ifname] = int(m.group(2))
-        except ValueError:
-            continue
-    return vlan_map
-
-
-_NOS_METADATA_BLOCK = (
-    "  <metadata>\n"
-    "    <nos:vlan xmlns:nos=\"https://github.com/theloger-png/nos\">{vlan_id}</nos:vlan>\n"
-    "  </metadata>\n"
+_INTERFACE_VLAN_BLOCK = (
+    "      <virtualport type='openvswitch'/>\n"
+    "      <vlan>\n"
+    "        <tag id='{vlan_id}'/>\n"
+    "      </vlan>\n"
 )
 
 _SEED_DISK_BLOCK = (
@@ -152,7 +78,7 @@ _DOMAIN_XML_TEMPLATE = """\
 <domain type='kvm'>
   <name>{name}</name>
   <uuid>{uuid}</uuid>
-{metadata_block}  <memory unit='MiB'>{ram_mb}</memory>
+  <memory unit='MiB'>{ram_mb}</memory>
   <currentMemory unit='MiB'>{ram_mb}</currentMemory>
   <vcpu>{cpu_cores}</vcpu>
   <os>
@@ -173,7 +99,7 @@ _DOMAIN_XML_TEMPLATE = """\
 {seed_disk_block}    <interface type='bridge'>
       <source bridge='{bridge}'/>
       <model type='virtio'/>
-    </interface>
+{interface_vlan_block}    </interface>
     <console type='pty'>
       <target type='serial' port='0'/>
     </console>
@@ -299,8 +225,8 @@ class LibvirtDriver:
             if seed_path:
                 seed_disk_block = _SEED_DISK_BLOCK.format(seed_path=seed_path)
 
-        metadata_block = (
-            _NOS_METADATA_BLOCK.format(vlan_id=vlan_id) if vlan_id is not None else ""
+        interface_vlan_block = (
+            _INTERFACE_VLAN_BLOCK.format(vlan_id=vlan_id) if vlan_id is not None else ""
         )
         xml = _DOMAIN_XML_TEMPLATE.format(
             name=name,
@@ -309,7 +235,7 @@ class LibvirtDriver:
             cpu_cores=cpu_cores,
             disk_path=disk_path,
             bridge=self._bridge,
-            metadata_block=metadata_block,
+            interface_vlan_block=interface_vlan_block,
             seed_disk_block=seed_disk_block,
         )
 
@@ -446,14 +372,14 @@ class LibvirtDriver:
             "disk_used_gb": disk.used / (1024 ** 3),
         }
 
-    def get_vm_config(self, libvirt_uuid: str, nos_client: object | None = None) -> dict:
+    def get_vm_config(self, libvirt_uuid: str) -> dict:
         """Return the current hardware configuration of a domain as a plain dict.
 
         Shape: {vcpu, memory_mb, disks: [{target, size_gb, path, device}],
                 nics: [{target, mac, bridge, vlan_id}]}
 
-        *nos_client* should be a NOSApiClient instance. When provided, each NIC's
-        vlan_id is resolved by querying GET /api/v1/config on the local NOS instance.
+        Each NIC's vlan_id is read directly from its own <vlan><tag id='X'/></vlan>
+        element in the domain XML, applied natively by libvirt+OVS.
         """
         conn = self._connect()
         try:
@@ -488,17 +414,16 @@ class LibvirtDriver:
             disks.append({"target": dev, "size_gb": size_gb, "path": path, "device": device})
 
         # --- NICs ---
-        nos_config = nos_client.get_config() if nos_client is not None else None
-        vlan_map = _parse_vlan_map(nos_config)
         nics: list[dict] = []
         for iface_elem in root.findall(".//interface[@type='bridge']"):
             mac_elem = iface_elem.find("mac")
             source = iface_elem.find("source")
             target = iface_elem.find("target")
+            tag_elem = iface_elem.find("vlan/tag")
             mac = mac_elem.get("address", "") if mac_elem is not None else ""
             bridge = source.get("bridge", "") if source is not None else ""
             vnet = target.get("dev", "") if target is not None else ""
-            vlan_id = vlan_map.get(vnet)
+            vlan_id = int(tag_elem.get("id")) if tag_elem is not None and tag_elem.get("id") else None
             nics.append({"target": vnet, "mac": mac, "bridge": bridge, "vlan_id": vlan_id})
 
         return {"vcpu": vcpu, "memory_mb": memory_mb, "disks": disks, "nics": nics}
@@ -511,7 +436,6 @@ class LibvirtDriver:
         self,
         libvirt_uuid: str,
         changes: dict,
-        nos_client: object | None = None,
     ) -> dict:
         """Apply hardware changes to a domain and return the resulting config.
 
@@ -519,12 +443,13 @@ class LibvirtDriver:
             vcpu (int): new vCPU count
             memory_mb (int): new RAM in MiB
             add_disks (list[{size_gb}]): new secondary disks to create and attach
-            add_nics (list[{vlan_id}]): new NICs to attach on *bridge* and provision in NOS
-            remove_nics (list[{target}]): existing NIC target names to detach and remove from NOS
+            add_nics (list[{vlan_id}]): new NICs to attach on *bridge*, VLAN-tagged
+                natively by libvirt+OVS
+            remove_nics (list[{target}]): existing NIC target names to detach
 
         Apply order:
-        1. NIC removals (live detach + NOS cleanup) — no reboot
-        2. NIC additions (live attach + NOS VLAN provisioning) — no reboot
+        1. NIC removals (live detach; OVS releases the port automatically) - no reboot
+        2. NIC additions (live attach with OVS VLAN tag) - no reboot
         3. If vcpu/memory/disk changes: graceful shutdown → modify XML → redefine → start
 
         Returns the updated hardware config dict (same shape as get_vm_config).
@@ -582,40 +507,29 @@ class LibvirtDriver:
                 else:
                     flags = libvirt.VIR_DOMAIN_AFFECT_CONFIG
 
-                detach_ok = False
                 try:
                     domain.detachDeviceFlags(detach_xml, flags)
-                    detach_ok = True
                 except libvirt.libvirtError as exc:
                     reason = str(exc)
                     logger.warning("detach NIC %s failed: %s", target_name, reason)
                     nic_failures.append({"target": target_name, "reason": reason})
 
-                # NOS cleanup only when the detach actually succeeded.
-                if detach_ok and nos_client is not None:
-                    nos_client.post_config([f"delete interfaces {target_name}"])
-                    nos_client.commit()
-
             # ── Step 2: NIC additions ─────────────────────────────────────
             for nic in add_nics:
                 vlan_id = nic.get("vlan_id")
+                vlan_fragment = (
+                    _INTERFACE_VLAN_BLOCK.format(vlan_id=vlan_id) if vlan_id is not None else ""
+                )
                 nic_xml = (
                     f"<interface type='bridge'>"
                     f"<source bridge='{self._bridge}'/>"
                     f"<model type='virtio'/>"
+                    f"{vlan_fragment}"
                     f"</interface>"
                 )
 
                 state, _ = domain.state()
                 is_running = state == libvirt.VIR_DOMAIN_RUNNING
-
-                # Capture interface targets before attachment so we can diff
-                before_xml = domain.XMLDesc(0)
-                before_targets = {
-                    e.find("target").get("dev")
-                    for e in ET.fromstring(before_xml).findall(".//interface[@type='bridge']")
-                    if e.find("target") is not None
-                }
 
                 flags = libvirt.VIR_DOMAIN_AFFECT_CONFIG
                 if is_running:
@@ -631,23 +545,6 @@ class LibvirtDriver:
                         "reason": reason,
                     })
                     continue
-
-                # Provision NOS only when the VM is running and vnetX is assigned
-                if is_running and nos_client is not None and vlan_id is not None:
-                    after_xml = domain.XMLDesc(0)
-                    after_targets = {
-                        e.find("target").get("dev")
-                        for e in ET.fromstring(after_xml).findall(".//interface[@type='bridge']")
-                        if e.find("target") is not None
-                    }
-                    for new_target in after_targets - before_targets:
-                        nos_client.post_config([
-                            f"set interfaces {new_target} unit 0 family "
-                            f"ethernet-switching interface-mode access",
-                            f"set interfaces {new_target} unit 0 family "
-                            f"ethernet-switching vlan members {vlan_id}",
-                        ])
-                        nos_client.commit()
 
             # ── Step 3: Shutdown → modify XML → redefine → start ─────────
             if needs_reboot:
@@ -745,6 +642,6 @@ class LibvirtDriver:
         finally:
             conn.close()
 
-        result = self.get_vm_config(libvirt_uuid, nos_client)
+        result = self.get_vm_config(libvirt_uuid)
         result["nic_failures"] = nic_failures
         return result

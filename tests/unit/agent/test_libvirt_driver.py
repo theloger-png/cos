@@ -13,8 +13,6 @@ from agent.libvirt_driver import (
     _make_cloud_init_meta_data,
     _mem_to_mib,
     _disk_size_gb,
-    _parse_vlan_map,
-    _vlan_for_iface,
 )
 
 
@@ -142,25 +140,37 @@ class TestCreateVMVlan:
 
         return captured[0]
 
-    def test_with_vlan_id_adds_nos_metadata(self, driver):
+    def test_with_vlan_id_adds_ovs_virtualport(self, driver):
         xml = self._captured_xml(driver, vlan_id=200)
-        assert "<metadata>" in xml
-        assert 'xmlns:nos="https://github.com/theloger-png/nos"' in xml
-        assert "<nos:vlan" in xml
-        assert ">200<" in xml
+        assert "<virtualport type='openvswitch'/>" in xml
+
+    def test_with_vlan_id_adds_vlan_tag(self, driver):
+        xml = self._captured_xml(driver, vlan_id=200)
+        assert "<vlan>" in xml
+        assert "<tag id='200'/>" in xml
 
     def test_vlan_id_value_is_correct(self, driver):
         xml = self._captured_xml(driver, vlan_id=42)
-        assert ">42<" in xml
+        assert "<tag id='42'/>" in xml
 
-    def test_without_vlan_id_no_metadata_block(self, driver):
+    def test_vlan_tag_nested_inside_interface_element(self, driver):
+        """The virtualport/vlan tag must be nested inside the bridge interface."""
+        xml = self._captured_xml(driver, vlan_id=200)
+        iface_start = xml.index("<interface type='bridge'>")
+        iface_end = xml.index("</interface>", iface_start)
+        iface_block = xml[iface_start:iface_end]
+        assert "<virtualport type='openvswitch'/>" in iface_block
+        assert "<tag id='200'/>" in iface_block
+
+    def test_without_vlan_id_no_virtualport_or_vlan_tag(self, driver):
         xml = self._captured_xml(driver)
-        assert "<metadata>" not in xml
-        assert "<nos:vlan" not in xml
+        assert "<virtualport" not in xml
+        assert "<vlan>" not in xml
 
-    def test_vlan_id_none_no_metadata_block(self, driver):
+    def test_vlan_id_none_no_virtualport_or_vlan_tag(self, driver):
         xml = self._captured_xml(driver, vlan_id=None)
-        assert "<metadata>" not in xml
+        assert "<virtualport" not in xml
+        assert "<vlan>" not in xml
 
 
 class TestStartVM:
@@ -457,123 +467,6 @@ class TestDiskSizeGb:
             assert _disk_size_gb("/bad/path.qcow2") == 0.0
 
 
-class TestVlanForIface:
-    def test_returns_vlan_id_from_scalar_members(self):
-        config = {
-            "interfaces": {
-                "vnet0": {
-                    "unit": {"0": {"family": {"ethernet-switching": {"vlan": {"members": "vlan101"}}}}}
-                }
-            }
-        }
-        assert _vlan_for_iface(config, "vnet0") == 101
-
-    def test_returns_vlan_id_from_list_members(self):
-        config = {
-            "interfaces": {
-                "vnet1": {
-                    "unit": {"0": {"family": {"ethernet-switching": {"vlan": {"members": ["vlan202"]}}}}}
-                }
-            }
-        }
-        assert _vlan_for_iface(config, "vnet1") == 202
-
-    def test_returns_none_when_interface_absent(self):
-        assert _vlan_for_iface({"interfaces": {}}, "vnet99") is None
-
-    def test_returns_none_for_none_config(self):
-        assert _vlan_for_iface(None, "vnet0") is None
-
-    def test_returns_none_on_malformed_config(self):
-        assert _vlan_for_iface({"interfaces": {"vnet0": "bad"}}, "vnet0") is None
-
-
-# ---------------------------------------------------------------------------
-# _parse_vlan_map tests
-# ---------------------------------------------------------------------------
-
-
-class TestParseVlanMap:
-    def test_extracts_vlan_id_for_present_interface(self):
-        response = {
-            "commands": [
-                'set interfaces vnet9 unit 0 family ethernet-switching interface-mode access',
-                'set interfaces vnet9 unit 0 family ethernet-switching vlan members 111',
-            ]
-        }
-        result = _parse_vlan_map(response)
-        assert result.get("vnet9") == 111
-
-    def test_returns_none_via_missing_key_for_absent_interface(self):
-        response = {
-            "commands": [
-                'set interfaces vnet9 unit 0 family ethernet-switching vlan members 111',
-            ]
-        }
-        result = _parse_vlan_map(response)
-        assert result.get("vnet99") is None
-
-    def test_handles_quoted_vlan_member_value(self):
-        response = {
-            "commands": [
-                'set interfaces vnet3 unit 0 family ethernet-switching vlan members "202"',
-            ]
-        }
-        result = _parse_vlan_map(response)
-        assert result.get("vnet3") == 202
-
-    def test_multiple_interfaces_mapped_independently(self):
-        response = {
-            "commands": [
-                'set interfaces vnet0 unit 0 family ethernet-switching vlan members 100',
-                'set interfaces vnet1 unit 0 family ethernet-switching vlan members 200',
-                'set interfaces vnet2 unit 0 family ethernet-switching vlan members 300',
-            ]
-        }
-        result = _parse_vlan_map(response)
-        assert result.get("vnet0") == 100
-        assert result.get("vnet1") == 200
-        assert result.get("vnet2") == 300
-
-    def test_last_entry_wins_for_duplicate_interface(self):
-        response = {
-            "commands": [
-                'set interfaces vnet5 unit 0 family ethernet-switching vlan members 10',
-                'set interfaces vnet5 unit 0 family ethernet-switching vlan members 20',
-            ]
-        }
-        result = _parse_vlan_map(response)
-        assert result.get("vnet5") == 20
-
-    def test_normalises_unit_suffix_in_ifname(self):
-        response = {
-            "commands": [
-                'set interfaces vnet7.0 unit 0 family ethernet-switching vlan members 77',
-            ]
-        }
-        result = _parse_vlan_map(response)
-        assert result.get("vnet7") == 77
-        assert "vnet7.0" not in result
-
-    def test_returns_empty_dict_for_none_response(self):
-        assert _parse_vlan_map(None) == {}
-
-    def test_returns_empty_dict_when_commands_key_missing(self):
-        assert _parse_vlan_map({"other_key": []}) == {}
-
-    def test_ignores_non_vlan_members_commands(self):
-        response = {
-            "commands": [
-                'set interfaces vnet0 unit 0 family ethernet-switching interface-mode access',
-                'set vlans vlan100 vlan-id 100',
-                'set interfaces vnet0 unit 0 family ethernet-switching vlan members 100',
-            ]
-        }
-        result = _parse_vlan_map(response)
-        assert len(result) == 1
-        assert result["vnet0"] == 100
-
-
 # ---------------------------------------------------------------------------
 # get_vm_config tests
 # ---------------------------------------------------------------------------
@@ -607,6 +500,11 @@ _SAMPLE_DOMAIN_XML = """\
 </domain>
 """
 
+_SAMPLE_DOMAIN_XML_WITH_VLAN = _SAMPLE_DOMAIN_XML.replace(
+    "<model type='virtio'/>\n    </interface>",
+    "<model type='virtio'/>\n      <vlan><tag id='101'/></vlan>\n    </interface>",
+)
+
 
 def _mock_domain_for_config(xml: str = _SAMPLE_DOMAIN_XML) -> MagicMock:
     d = MagicMock()
@@ -615,7 +513,7 @@ def _mock_domain_for_config(xml: str = _SAMPLE_DOMAIN_XML) -> MagicMock:
 
 
 class TestGetVmConfig:
-    def _run(self, xml: str = _SAMPLE_DOMAIN_XML, nos_client=None) -> dict:
+    def _run(self, xml: str = _SAMPLE_DOMAIN_XML) -> dict:
         domain = _mock_domain_for_config(xml)
         conn = MagicMock()
         conn.lookupByUUIDString.return_value = domain
@@ -624,7 +522,7 @@ class TestGetVmConfig:
         with patch("libvirt.open", return_value=conn), \
              patch("os.path.exists", return_value=True), \
              patch("subprocess.run", return_value=MagicMock(returncode=1)):
-            return driver.get_vm_config("abc-123", nos_client)
+            return driver.get_vm_config("abc-123")
 
     def test_returns_vcpu(self):
         result = self._run()
@@ -647,21 +545,13 @@ class TestGetVmConfig:
         assert nic["mac"] == "52:54:00:11:22:33"
         assert nic["bridge"] == "nos-br"
 
-    def test_nic_vlan_id_from_nos_client(self):
-        """get_vm_config resolves vlan_id via NOS set-command config response."""
-        nos_response = {
-            "commands": [
-                "set interfaces vnet0 unit 0 family ethernet-switching interface-mode access",
-                "set interfaces vnet0 unit 0 family ethernet-switching vlan members 101",
-            ]
-        }
-        nos_client = MagicMock()
-        nos_client.get_config.return_value = nos_response
-        result = self._run(nos_client=nos_client)
+    def test_nic_vlan_id_from_domain_xml(self):
+        """get_vm_config reads vlan_id from the interface's own <vlan><tag id='X'/> element."""
+        result = self._run(xml=_SAMPLE_DOMAIN_XML_WITH_VLAN)
         assert result["nics"][0]["vlan_id"] == 101
 
-    def test_nic_vlan_id_none_when_no_nos_client(self):
-        result = self._run(nos_client=None)
+    def test_nic_vlan_id_none_when_no_vlan_tag(self):
+        result = self._run()
         assert result["nics"][0]["vlan_id"] is None
 
     def test_disk_size_queried_via_qemu_img(self):
@@ -698,16 +588,13 @@ _SAMPLE_DOMAIN_XML_WITH_PCI = _SAMPLE_DOMAIN_XML.replace(
 
 
 class TestApplyVmConfigNicRemoval:
-    """NIC removal — live detach + NOS cleanup, no reboot."""
+    """NIC removal - live detach only; OVS releases the port automatically, no reboot."""
 
     def _run_remove(self, target="vnet0", domain_xml=_SAMPLE_DOMAIN_XML):
         domain = _mock_domain_for_config(domain_xml)
         domain.state.return_value = (1, 0)  # VIR_DOMAIN_RUNNING = 1
         conn = MagicMock()
         conn.lookupByUUIDString.return_value = domain
-        nos_client = MagicMock()
-        nos_client.post_config.return_value = True
-        nos_client.commit.return_value = True
         driver = LibvirtDriver(uri="qemu:///system", bridge="nos-br")
 
         with patch("libvirt.open", return_value=conn), \
@@ -715,18 +602,18 @@ class TestApplyVmConfigNicRemoval:
              patch("subprocess.run", return_value=MagicMock(returncode=1)):
             # get_vm_config is called at the end too; avoid real libvirt there
             driver.get_vm_config = MagicMock(return_value={"vcpu": 2, "memory_mb": 2048, "disks": [], "nics": []})
-            result = driver.apply_vm_config("abc-123", {"remove_nics": [{"target": target}]}, nos_client)
+            result = driver.apply_vm_config("abc-123", {"remove_nics": [{"target": target}]})
 
-        return domain, nos_client, result
+        return domain, result
 
     def test_detach_called(self):
-        domain, _, _ = self._run_remove()
+        domain, _ = self._run_remove()
         domain.detachDeviceFlags.assert_called_once()
 
     def test_detach_uses_live_flag_only_when_running(self):
         """Running domain: detach must use VIR_DOMAIN_AFFECT_LIVE alone, not combined."""
         import libvirt as _lv
-        domain, _, _ = self._run_remove()  # domain.state returns VIR_DOMAIN_RUNNING
+        domain, _ = self._run_remove()  # domain.state returns VIR_DOMAIN_RUNNING
         _, flags = domain.detachDeviceFlags.call_args[0]
         assert flags == _lv.VIR_DOMAIN_AFFECT_LIVE
 
@@ -743,60 +630,29 @@ class TestApplyVmConfigNicRemoval:
         with patch("libvirt.open", return_value=conn), \
              patch("os.path.exists", return_value=True), \
              patch("subprocess.run", return_value=MagicMock(returncode=1)):
-            driver.apply_vm_config("abc-123", {"remove_nics": [{"target": "vnet0"}]}, None)
+            driver.apply_vm_config("abc-123", {"remove_nics": [{"target": "vnet0"}]})
 
         _, flags = domain.detachDeviceFlags.call_args[0]
         assert flags == _lv.VIR_DOMAIN_AFFECT_CONFIG
 
-    def test_nos_delete_called(self):
-        _, nos_client, _ = self._run_remove("vnet0")
-        nos_client.post_config.assert_called_once()
-        call_args = nos_client.post_config.call_args[0][0]
-        assert any("delete interfaces vnet0" in c for c in call_args)
-
-    def test_nos_commit_called(self):
-        _, nos_client, _ = self._run_remove()
-        nos_client.commit.assert_called_once()
-
     def test_no_shutdown_for_nic_only_removal(self):
-        domain, _, _ = self._run_remove()
+        domain, _ = self._run_remove()
         domain.shutdown.assert_not_called()
 
     def test_detach_xml_has_no_address_or_alias(self):
         """Detach XML must omit <address> and <alias> to avoid PCI mismatch."""
-        domain, _, _ = self._run_remove(domain_xml=_SAMPLE_DOMAIN_XML_WITH_PCI)
+        domain, _ = self._run_remove(domain_xml=_SAMPLE_DOMAIN_XML_WITH_PCI)
         captured_xml = domain.detachDeviceFlags.call_args[0][0]
         assert "<address" not in captured_xml
         assert "<alias" not in captured_xml
 
     def test_detach_xml_contains_mac_and_source(self):
         """Detach XML must include the NIC's MAC and bridge source."""
-        domain, _, _ = self._run_remove()
+        domain, _ = self._run_remove()
         captured_xml = domain.detachDeviceFlags.call_args[0][0]
         assert "52:54:00:11:22:33" in captured_xml
         assert "nos-br" in captured_xml
         assert "virtio" in captured_xml
-
-    def test_nos_not_called_when_detach_fails(self):
-        """NOS cleanup must be skipped when detachDeviceFlags raises."""
-        import libvirt as _lv
-        domain = _mock_domain_for_config()
-        domain.state.return_value = (1, 0)
-        domain.detachDeviceFlags.side_effect = _lv.libvirtError("device not found")
-
-        conn = MagicMock()
-        conn.lookupByUUIDString.return_value = domain
-        nos_client = MagicMock()
-        driver = LibvirtDriver(uri="qemu:///system", bridge="nos-br")
-        driver.get_vm_config = MagicMock(return_value={"vcpu": 2, "memory_mb": 2048, "disks": [], "nics": []})
-
-        with patch("libvirt.open", return_value=conn), \
-             patch("os.path.exists", return_value=True), \
-             patch("subprocess.run", return_value=MagicMock(returncode=1)):
-            driver.apply_vm_config("abc-123", {"remove_nics": [{"target": "vnet0"}]}, nos_client)
-
-        nos_client.post_config.assert_not_called()
-        nos_client.commit.assert_not_called()
 
     def test_result_reports_nic_failure_on_detach_error(self):
         """apply_vm_config result must include nic_failures when detach fails."""
@@ -813,7 +669,7 @@ class TestApplyVmConfigNicRemoval:
         with patch("libvirt.open", return_value=conn), \
              patch("os.path.exists", return_value=True), \
              patch("subprocess.run", return_value=MagicMock(returncode=1)):
-            result = driver.apply_vm_config("abc-123", {"remove_nics": [{"target": "vnet0"}]}, None)
+            result = driver.apply_vm_config("abc-123", {"remove_nics": [{"target": "vnet0"}]})
 
         assert len(result["nic_failures"]) == 1
         assert result["nic_failures"][0]["target"] == "vnet0"
@@ -821,65 +677,23 @@ class TestApplyVmConfigNicRemoval:
 
     def test_result_nic_failures_empty_on_success(self):
         """apply_vm_config result has empty nic_failures when detach succeeds."""
-        _, _, result = self._run_remove()
+        _, result = self._run_remove()
         assert result["nic_failures"] == []
-
-    def test_nos_called_when_detach_succeeds(self):
-        """NOS cleanup is called exactly once when detach succeeds."""
-        _, nos_client, _ = self._run_remove("vnet0")
-        nos_client.post_config.assert_called_once()
-        nos_client.commit.assert_called_once()
 
 
 class TestApplyVmConfigNicAddition:
-    """NIC addition — live attach + NOS VLAN provisioning, no reboot."""
+    """NIC addition - live attach with OVS VLAN tag applied natively, no reboot."""
 
-    def _build_domain(self, before_xml=_SAMPLE_DOMAIN_XML):
-        """Domain that returns updated XML after attachDeviceFlags is called."""
-        after_xml = before_xml.replace(
-            "<target dev='vnet0'/>",
-            "<target dev='vnet0'/></interface>\n    <interface type='bridge'>"
-            "<mac address='52:54:00:aa:bb:cc'/><source bridge='nos-br'/>"
-            "<target dev='vnet1'/><model type='virtio'/>",
-        )
-        call_count = [0]
+    def _build_domain(self):
         domain = MagicMock()
         domain.state.return_value = (1, 0)  # running
-
-        def _xmldesc(flags=0):
-            return after_xml if call_count[0] > 0 else before_xml
-
-        def _attach(xml, flags):
-            call_count[0] += 1
-
-        domain.XMLDesc.side_effect = _xmldesc
-        domain.attachDeviceFlags.side_effect = _attach
+        domain.XMLDesc.return_value = _SAMPLE_DOMAIN_XML
         return domain
-
-    def test_attach_called(self):
-        domain = self._build_domain()
-        conn = MagicMock()
-        conn.lookupByUUIDString.return_value = domain
-        nos_client = MagicMock()
-        nos_client.post_config.return_value = True
-        nos_client.commit.return_value = True
-        driver = LibvirtDriver(uri="qemu:///system", bridge="nos-br")
-        driver.get_vm_config = MagicMock(return_value={"vcpu": 2, "memory_mb": 2048, "disks": [], "nics": []})
-
-        with patch("libvirt.open", return_value=conn), \
-             patch("os.path.exists", return_value=True), \
-             patch("subprocess.run", return_value=MagicMock(returncode=1)):
-            driver.apply_vm_config("abc-123", {"add_nics": [{"vlan_id": 101}]}, nos_client)
-
-        domain.attachDeviceFlags.assert_called_once()
 
     def _run_add(self, vlan_id=111):
         domain = self._build_domain()
         conn = MagicMock()
         conn.lookupByUUIDString.return_value = domain
-        nos_client = MagicMock()
-        nos_client.post_config.return_value = True
-        nos_client.commit.return_value = True
         driver = LibvirtDriver(uri="qemu:///system", bridge="nos-br")
         driver.get_vm_config = MagicMock(
             return_value={"vcpu": 2, "memory_mb": 2048, "disks": [], "nics": []}
@@ -888,61 +702,50 @@ class TestApplyVmConfigNicAddition:
         with patch("libvirt.open", return_value=conn), \
              patch("os.path.exists", return_value=True), \
              patch("subprocess.run", return_value=MagicMock(returncode=1)):
-            driver.apply_vm_config("abc-123", {"add_nics": [{"vlan_id": vlan_id}]}, nos_client)
+            driver.apply_vm_config("abc-123", {"add_nics": [{"vlan_id": vlan_id}]})
 
-        return nos_client
+        return domain
 
-    def test_nos_vlan_provisioned(self):
-        nos_client = self._run_add(vlan_id=101)
-        nos_client.post_config.assert_called_once()
-        cmds = nos_client.post_config.call_args[0][0]
-        assert any("vlan members 101" in c for c in cmds)
-        nos_client.commit.assert_called_once()
+    def test_attach_called(self):
+        domain = self._run_add(vlan_id=101)
+        domain.attachDeviceFlags.assert_called_once()
 
-    def test_nos_sends_interface_mode_access(self):
-        """post_config must include 'interface-mode access' for the new vnetX."""
-        nos_client = self._run_add(vlan_id=111)
-        cmds = nos_client.post_config.call_args[0][0]
-        assert any("interface-mode access" in c for c in cmds)
+    def test_attach_xml_contains_ovs_virtualport(self):
+        domain = self._run_add(vlan_id=101)
+        xml_arg = domain.attachDeviceFlags.call_args[0][0]
+        assert "<virtualport type='openvswitch'/>" in xml_arg
 
-    def test_nos_vlan_members_is_numeric_not_prefixed(self):
-        """'vlan members 111' must be sent, NOT 'vlan members vlan111'."""
-        nos_client = self._run_add(vlan_id=111)
-        cmds = nos_client.post_config.call_args[0][0]
-        assert any("vlan members 111" in c for c in cmds)
-        assert not any("vlan members vlan111" in c for c in cmds)
+    def test_attach_xml_contains_vlan_tag(self):
+        domain = self._run_add(vlan_id=101)
+        xml_arg = domain.attachDeviceFlags.call_args[0][0]
+        assert "<vlan>" in xml_arg
+        assert "<tag id='101'/>" in xml_arg
 
-    def test_nos_both_commands_in_one_post_config_call(self):
-        """Both interface-mode access and vlan members must be sent in a single post_config call."""
-        nos_client = self._run_add(vlan_id=111)
-        nos_client.post_config.assert_called_once()
-        cmds = nos_client.post_config.call_args[0][0]
-        assert len(cmds) == 2
-        access_cmds = [c for c in cmds if "interface-mode access" in c]
-        members_cmds = [c for c in cmds if "vlan members 111" in c]
-        assert len(access_cmds) == 1
-        assert len(members_cmds) == 1
+    def test_attach_xml_vlan_id_value_correct(self):
+        domain = self._run_add(vlan_id=222)
+        xml_arg = domain.attachDeviceFlags.call_args[0][0]
+        assert "<tag id='222'/>" in xml_arg
 
-    def test_nos_commit_called_once_per_nic(self):
-        """Exactly one commit() is issued per newly attached NIC."""
-        nos_client = self._run_add(vlan_id=111)
-        nos_client.commit.assert_called_once()
+    def test_attach_xml_uses_configured_bridge(self):
+        domain = self._run_add(vlan_id=111)
+        xml_arg = domain.attachDeviceFlags.call_args[0][0]
+        assert "<source bridge='nos-br'/>" in xml_arg
+
+    def test_attach_xml_no_vlan_tag_when_vlan_id_none(self):
+        domain = self._run_add(vlan_id=None)
+        xml_arg = domain.attachDeviceFlags.call_args[0][0]
+        assert "<virtualport" not in xml_arg
+        assert "<vlan>" not in xml_arg
+
+    def test_attach_uses_live_and_config_flags_when_running(self):
+        """Running domain: attach must combine LIVE and CONFIG flags."""
+        import libvirt as _lv
+        domain = self._run_add(vlan_id=111)
+        _, flags = domain.attachDeviceFlags.call_args[0]
+        assert flags == (_lv.VIR_DOMAIN_AFFECT_CONFIG | _lv.VIR_DOMAIN_AFFECT_LIVE)
 
     def test_no_shutdown_for_nic_only_addition(self):
-        domain = self._build_domain()
-        conn = MagicMock()
-        conn.lookupByUUIDString.return_value = domain
-        nos_client = MagicMock()
-        nos_client.post_config.return_value = True
-        nos_client.commit.return_value = True
-        driver = LibvirtDriver(uri="qemu:///system", bridge="nos-br")
-        driver.get_vm_config = MagicMock(return_value={"vcpu": 2, "memory_mb": 2048, "disks": [], "nics": []})
-
-        with patch("libvirt.open", return_value=conn), \
-             patch("os.path.exists", return_value=True), \
-             patch("subprocess.run", return_value=MagicMock(returncode=1)):
-            driver.apply_vm_config("abc-123", {"add_nics": [{"vlan_id": 101}]}, nos_client)
-
+        domain = self._run_add(vlan_id=101)
         domain.shutdown.assert_not_called()
 
 
