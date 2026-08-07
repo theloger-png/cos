@@ -25,7 +25,6 @@ class Node(Base):
     disk_used_gb: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="offline")
     last_heartbeat: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    nos_api_key: Mapped[str] = mapped_column(String(256), nullable=False, default="")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     vms: Mapped[list[VM]] = relationship("VM", back_populates="node", lazy="select")

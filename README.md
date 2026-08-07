@@ -102,7 +102,6 @@ pytest tests/ -v
 | `COS_API_HOST` | `0.0.0.0` | Listen address |
 | `COS_API_PORT` | `8090` | Listen port |
 | `COS_NOS_API_URL` | `http://127.0.0.1:8080` | NOS controller URL |
-| `COS_NOS_API_KEY` | `` | NOS API key |
 | `COS_AGENT_HEARTBEAT_TIMEOUT_SECONDS` | `90` | Mark node offline after this many seconds |
 
 ### Agent (`COS_AGENT_` prefix)

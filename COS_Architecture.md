@@ -187,7 +187,7 @@ cos/
 - cpu_total, cpu_used, ram_total_mb, ram_used_mb
 - disk_total_gb, disk_used_gb
 - status (online/offline/maintenance)
-- last_heartbeat, nos_api_key, created_at
+- last_heartbeat, created_at
 
 ### VM
 - id, name, tenant_id (FK), node_id (FK)
@@ -335,7 +335,7 @@ sudo bash scripts/cos-install.sh --role agent
 6. Install and start cos-agent.service
 
 ### Configuration Files
-- /opt/cos/config/controller.env - COS_NOS_API_URL, COS_NOS_API_KEY, etc.
+- /opt/cos/config/controller.env - COS_NOS_API_URL, etc.
 - /opt/cos/config/agent.env - COS_AGENT_CONTROLLER_URL, COS_AGENT_CONTROLLER_API_KEY, etc.
 - /opt/cos/admin_api_key - X-API-Key for programmatic access (mode 640)
 - /opt/cos/admin_password - portal admin user password (mode 640)
