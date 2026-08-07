@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from unittest.mock import ANY, AsyncMock, patch, MagicMock
+from unittest.mock import AsyncMock, patch, MagicMock
 
 import pytest
 
@@ -222,4 +222,4 @@ class TestVmApplyConfigCommand:
                 payload={"libvirt_uuid": "vm-uuid"},
             ))
         assert result.success is True
-        libvirt.apply_vm_config.assert_called_once_with("vm-uuid", {}, ANY)
+        libvirt.apply_vm_config.assert_called_once_with("vm-uuid", {})
