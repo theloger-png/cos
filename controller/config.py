@@ -13,8 +13,6 @@ class Settings(BaseSettings):
     secret_key: str = ""
     api_host: str = "0.0.0.0"
     api_port: int = 8090
-    nos_api_url: str = "http://127.0.0.1:8080"
-    nos_api_key: str = ""
     agent_heartbeat_timeout_seconds: int = 90
 
     def model_post_init(self, __context: object) -> None:

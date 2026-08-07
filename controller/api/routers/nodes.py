@@ -22,7 +22,6 @@ class NodeCreate(BaseModel):
     cpu_total: int
     ram_total_mb: int
     disk_total_gb: float
-    nos_api_key: str = ""
 
 
 
@@ -84,7 +83,6 @@ async def register_node(
         existing.cpu_total = body.cpu_total
         existing.ram_total_mb = body.ram_total_mb
         existing.disk_total_gb = body.disk_total_gb
-        existing.nos_api_key = body.nos_api_key
         existing.status = NodeStatus.offline.value
         existing.last_heartbeat = datetime.now(timezone.utc)
         await session.commit()
@@ -100,7 +98,6 @@ async def register_node(
         cpu_total=body.cpu_total,
         ram_total_mb=body.ram_total_mb,
         disk_total_gb=body.disk_total_gb,
-        nos_api_key=body.nos_api_key,
         status=NodeStatus.offline.value,
     )
     session.add(node)

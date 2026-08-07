@@ -49,7 +49,6 @@ async def _register_node(client: httpx.AsyncClient) -> None:
         "cpu_total": len(__import__("psutil").cpu_percent(percpu=True)),
         "ram_total_mb": stats["ram_total_mb"],
         "disk_total_gb": stats["disk_total_gb"],
-        "nos_api_key": settings.nos_api_key,
     }
     try:
         resp = await client.post(

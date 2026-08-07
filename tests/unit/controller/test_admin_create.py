@@ -281,9 +281,6 @@ class TestCreateNetworkAdmin:
         tenant_result = MagicMock()
         tenant_result.scalar_one_or_none.return_value = tenant
 
-        empty_result = MagicMock()
-        empty_result.scalars.return_value.all.return_value = []
-
         _net_id = uuid.uuid4()
         _created_at = datetime.now(timezone.utc)
 
@@ -292,14 +289,12 @@ class TestCreateNetworkAdmin:
             obj.created_at = _created_at
 
         session = AsyncMock()
-        session.execute = AsyncMock(side_effect=[tenant_result, empty_result])
+        session.execute = AsyncMock(return_value=tenant_result)
         session.add = MagicMock()
         session.commit = AsyncMock()
         session.refresh = _fake_refresh
 
-        with patch("controller.api.routers.networks._agent_client") as mock_agent:
-            mock_agent.send_command = AsyncMock()
-            result = await create_network(body=body, session=session, auth=(None, None))
+        result = await create_network(body=body, session=session, auth=(None, None))
 
         assert result.tenant_id == tenant.id
 
@@ -324,18 +319,12 @@ class TestCreateNetworkAdmin:
             obj.id = _net_id
             obj.created_at = _created_at
 
-        empty_result = MagicMock()
-        empty_result.scalars.return_value.all.return_value = []
-
         session = AsyncMock()
-        session.execute = AsyncMock(return_value=empty_result)
         session.add = MagicMock()
         session.commit = AsyncMock()
         session.refresh = _fake_refresh
 
-        with patch("controller.api.routers.networks._agent_client") as mock_agent:
-            mock_agent.send_command = AsyncMock()
-            result = await create_network(body=body, session=session, auth=(None, real_tenant))
+        result = await create_network(body=body, session=session, auth=(None, real_tenant))
 
         assert result.tenant_id == real_tenant.id
 
@@ -399,15 +388,11 @@ class TestAdminOwnershipBypass:
 
         net_result = MagicMock()
         net_result.scalar_one_or_none.return_value = network
-        empty_result = MagicMock()
-        empty_result.scalars.return_value.all.return_value = []
         session = AsyncMock()
-        session.execute = AsyncMock(side_effect=[net_result, empty_result])
+        session.execute = AsyncMock(return_value=net_result)
         session.delete = AsyncMock()
         session.commit = AsyncMock()
 
-        with patch("controller.api.routers.networks._agent_client") as mock_agent:
-            mock_agent.send_command = AsyncMock()
-            await delete_network(network_id=network.id, session=session, auth=(None, None))
+        await delete_network(network_id=network.id, session=session, auth=(None, None))
 
         session.delete.assert_awaited_once_with(network)

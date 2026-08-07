@@ -6,7 +6,6 @@ import json
 import logging
 
 from agent.libvirt_driver import LibvirtDriver
-from agent.nos_driver import load_nos_driver
 from agent.config import settings
 from common.models import AgentCommand, AgentCommandResult
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
@@ -16,11 +15,6 @@ logger = logging.getLogger(__name__)
 app = FastAPI(title="COS Agent")
 
 _libvirt = LibvirtDriver(uri=settings.libvirt_uri, bridge=settings.vm_bridge)
-_nos = load_nos_driver(
-    base_url=settings.nos_api_url,
-    api_key=settings.nos_api_key,
-    api_key_file=settings.nos_api_key_file,
-)
 
 
 async def _dispatch(command: AgentCommand) -> AgentCommandResult:
@@ -69,14 +63,6 @@ async def _dispatch(command: AgentCommand) -> AgentCommandResult:
         elif cmd == "node_stats":
             stats = _libvirt.get_node_stats()
             return AgentCommandResult(success=True, output=json.dumps(stats))
-
-        elif cmd == "configure_vlan":
-            ok = await _nos.configure_vlan(p["vlan_id"])
-            return AgentCommandResult(success=ok, output="configured" if ok else "", error=None if ok else "configure_vlan failed")
-
-        elif cmd == "remove_vlan":
-            ok = await _nos.remove_vlan(p["vlan_id"])
-            return AgentCommandResult(success=ok, output="removed" if ok else "", error=None if ok else "remove_vlan failed")
 
         elif cmd == "vm_get_config":
             config = _libvirt.get_vm_config(p["libvirt_uuid"])
