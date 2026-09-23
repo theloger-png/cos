@@ -31,6 +31,8 @@ class VMCreate(BaseModel):
     cpu_cores: int
     ram_mb: int
     disk_gb: int
+    ip_cidr: str | None = None  # optional static IP (e.g. "192.168.1.50/24"); DHCP if omitted
+    gateway: str | None = None  # optional static IP gateway; required alongside ip_cidr
 
 
 class AddDiskRequest(BaseModel):
@@ -220,6 +222,9 @@ async def create_vm(
     }
     if vlan_id is not None:
         vm_create_payload["vlan_id"] = vlan_id
+    if body.ip_cidr is not None and body.gateway is not None:
+        vm_create_payload["ip_cidr"] = body.ip_cidr
+        vm_create_payload["gateway"] = body.gateway
     result = await agent.send_command(node.ip_address, "vm_create", vm_create_payload)
     if result.success:
         vm.libvirt_uuid = result.output.strip()

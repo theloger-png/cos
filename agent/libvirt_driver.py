@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import random
 import shutil
 import subprocess
 import tempfile
@@ -97,6 +98,7 @@ _DOMAIN_XML_TEMPLATE = """\
       <target dev='vda' bus='virtio'/>
     </disk>
 {seed_disk_block}    <interface type='bridge'>
+      <mac address='{mac_address}'/>
       <source bridge='{bridge}'/>
       <model type='virtio'/>
 {interface_vlan_block}    </interface>
@@ -107,6 +109,12 @@ _DOMAIN_XML_TEMPLATE = """\
   </devices>
 </domain>
 """
+
+
+def _generate_mac() -> str:
+    """Generate a random MAC address under the libvirt-convention 52:54:00 OUI prefix."""
+    octets = [0x52, 0x54, 0x00] + [random.randint(0x00, 0xFF) for _ in range(3)]
+    return ":".join(f"{o:02x}" for o in octets)
 
 
 def _make_cloud_init_user_data(cloud_init_user: str, cloud_init_password_hash: str) -> str:
@@ -131,6 +139,28 @@ def _make_cloud_init_meta_data(vm_name: str, instance_id: str) -> str:
     )
 
 
+def _make_cloud_init_network_config(mac_address: str, ip_cidr: str, gateway: str) -> str:
+    """Return cloud-init network-config v2 YAML for a single static-IP interface.
+
+    The interface is matched by MAC address rather than name, since the
+    guest-visible interface name (ens3, enp1s0, ...) varies by OS and virtio
+    driver, while the MAC is known and fixed at domain-definition time.
+    """
+    return (
+        "network:\n"
+        "  version: 2\n"
+        "  ethernets:\n"
+        "    eth0:\n"
+        "      match:\n"
+        f"        macaddress: '{mac_address}'\n"
+        "      addresses:\n"
+        f"        - {ip_cidr}\n"
+        "      routes:\n"
+        "        - to: default\n"
+        f"          via: {gateway}\n"
+    )
+
+
 class LibvirtDriver:
     """Manages KVM virtual machines via libvirt."""
 
@@ -150,11 +180,17 @@ class LibvirtDriver:
         vm_uuid: str,
         cloud_init_user: str,
         cloud_init_password_hash: str,
+        network_config: str | None = None,
     ) -> str | None:
         """Build a cloud-init seed ISO and return its path, or None on failure.
 
         Uses a random UUID as instance-id on every call to avoid cloud-init
         skipping re-configuration when an image is reused across VMs.
+
+        When *network_config* is given, it is written as a network-config v2
+        file and passed to cloud-localds via --network-config, configuring a
+        static IP on the guest's NIC. When omitted, no network-config file is
+        added and the guest falls back to its default DHCP behavior.
         """
         os.makedirs(_SEED_BASE_DIR, exist_ok=True)
         seed_path = os.path.join(_SEED_BASE_DIR, f"{vm_uuid}.iso")
@@ -171,11 +207,15 @@ class LibvirtDriver:
                     f.write(user_data)
                 with open(meta_data_path, "w") as f:
                     f.write(meta_data)
-                result = subprocess.run(
-                    ["cloud-localds", seed_path, user_data_path, meta_data_path],
-                    capture_output=True,
-                    text=True,
-                )
+
+                cmd = ["cloud-localds", seed_path, user_data_path, meta_data_path]
+                if network_config:
+                    network_config_path = os.path.join(tmpdir, "network-config")
+                    with open(network_config_path, "w") as f:
+                        f.write(network_config)
+                    cmd += ["--network-config", network_config_path]
+
+                result = subprocess.run(cmd, capture_output=True, text=True)
                 if result.returncode != 0:
                     logger.error("cloud-localds failed for %s: %s", vm_name, result.stderr)
                     return None
@@ -195,9 +235,12 @@ class LibvirtDriver:
         vlan_id: int | None = None,
         cloud_init_user: str | None = None,
         cloud_init_password_hash: str | None = None,
+        ip_cidr: str | None = None,
+        gateway: str | None = None,
     ) -> str:
         """Define and start a new KVM domain, returning its libvirt UUID."""
         domain_uuid = str(uuid.uuid4())
+        mac_address = _generate_mac()
         os.makedirs(_DISK_BASE_DIR, exist_ok=True)
         disk_path = os.path.join(_DISK_BASE_DIR, f"{domain_uuid}.qcow2")
 
@@ -216,11 +259,17 @@ class LibvirtDriver:
 
         seed_disk_block = ""
         if cloud_init_user and cloud_init_password_hash:
+            network_config = None
+            if ip_cidr and gateway:
+                network_config = _make_cloud_init_network_config(
+                    mac_address=mac_address, ip_cidr=ip_cidr, gateway=gateway
+                )
             seed_path = self._build_cloud_init_seed(
                 vm_name=name,
                 vm_uuid=domain_uuid,
                 cloud_init_user=cloud_init_user,
                 cloud_init_password_hash=cloud_init_password_hash,
+                network_config=network_config,
             )
             if seed_path:
                 seed_disk_block = _SEED_DISK_BLOCK.format(seed_path=seed_path)
@@ -235,6 +284,7 @@ class LibvirtDriver:
             cpu_cores=cpu_cores,
             disk_path=disk_path,
             bridge=self._bridge,
+            mac_address=mac_address,
             interface_vlan_block=interface_vlan_block,
             seed_disk_block=seed_disk_block,
         )

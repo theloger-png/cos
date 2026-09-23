@@ -137,7 +137,10 @@ class AgentCommand(BaseModel):
     """Command sent from controller to agent over WebSocket.
 
     vm_create payload keys: name, cpu_cores, ram_mb, disk_gb, image_path,
-    vlan_id (optional int — omit to let nos-libvirt-hook default to VLAN 115).
+    vlan_id (optional int), ip_cidr (optional str, e.g. "192.168.1.50/24"),
+    gateway (optional str, e.g. "192.168.1.1"). ip_cidr and gateway configure
+    a static IP on the VM's single NIC via cloud-init network-config; when
+    omitted the guest uses DHCP.
     """
 
     command: str

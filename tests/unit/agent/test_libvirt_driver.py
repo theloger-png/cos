@@ -11,6 +11,8 @@ from agent.libvirt_driver import (
     LibvirtDriver,
     _make_cloud_init_user_data,
     _make_cloud_init_meta_data,
+    _make_cloud_init_network_config,
+    _generate_mac,
     _mem_to_mib,
     _disk_size_gb,
 )
@@ -118,6 +120,53 @@ class TestCreateVM:
 
         xml = captured_xml[0]
         assert "<source bridge='custom-br0'/>" in xml
+
+    def test_xml_has_mac_address(self, driver):
+        domain = _mock_domain()
+        conn = _mock_conn()
+        captured_xml: list[str] = []
+        conn.defineXML.side_effect = lambda xml: (captured_xml.append(xml), domain)[1]
+
+        with patch("libvirt.open", return_value=conn), \
+             patch("os.makedirs"), \
+             patch("os.path.exists", return_value=False), \
+             patch("os.system"):
+            driver.create_vm("vm-01", 2, 2048, 20, "")
+
+        assert "<mac address='52:54:00:" in captured_xml[0]
+
+
+class TestGenerateMac:
+    def test_uses_libvirt_oui_prefix(self):
+        assert _generate_mac().startswith("52:54:00:")
+
+    def test_format_is_six_colon_separated_octets(self):
+        parts = _generate_mac().split(":")
+        assert len(parts) == 6
+        assert all(len(p) == 2 for p in parts)
+
+    def test_different_calls_produce_different_macs(self):
+        macs = {_generate_mac() for _ in range(20)}
+        assert len(macs) > 1
+
+
+class TestMakeCloudInitNetworkConfig:
+    def test_contains_version_2(self):
+        cfg = _make_cloud_init_network_config("52:54:00:ab:cd:ef", "192.168.1.50/24", "192.168.1.1")
+        assert "version: 2" in cfg
+
+    def test_matches_by_mac_address(self):
+        cfg = _make_cloud_init_network_config("52:54:00:ab:cd:ef", "192.168.1.50/24", "192.168.1.1")
+        assert "macaddress: '52:54:00:ab:cd:ef'" in cfg
+
+    def test_contains_ip_cidr(self):
+        cfg = _make_cloud_init_network_config("52:54:00:ab:cd:ef", "192.168.1.50/24", "192.168.1.1")
+        assert "- 192.168.1.50/24" in cfg
+
+    def test_contains_default_route_via_gateway(self):
+        cfg = _make_cloud_init_network_config("52:54:00:ab:cd:ef", "192.168.1.50/24", "192.168.1.1")
+        assert "to: default" in cfg
+        assert "via: 192.168.1.1" in cfg
 
 
 class TestCreateVMVlan:
@@ -419,6 +468,43 @@ class TestCreateVMWithCloudInit:
 
         assert captured, "defineXML should have been called"
         assert "device='cdrom'" not in captured[0]
+
+    def test_network_config_passed_when_ip_cidr_and_gateway_given(self, driver):
+        mock_proc = MagicMock()
+        mock_proc.returncode = 0
+        mock_proc.stderr = ""
+
+        with patch("subprocess.run", return_value=mock_proc) as mock_run, \
+             patch("os.makedirs"), \
+             patch("builtins.open", MagicMock()):
+            self._captured_xml(
+                driver,
+                cloud_init_user="ubuntu",
+                cloud_init_password_hash="$6$salt$hash",
+                ip_cidr="192.168.1.50/24",
+                gateway="192.168.1.1",
+            )
+
+        cmd = mock_run.call_args[0][0]
+        assert "--network-config" in cmd
+
+    def test_no_network_config_when_ip_cidr_or_gateway_missing(self, driver):
+        mock_proc = MagicMock()
+        mock_proc.returncode = 0
+        mock_proc.stderr = ""
+
+        with patch("subprocess.run", return_value=mock_proc) as mock_run, \
+             patch("os.makedirs"), \
+             patch("builtins.open", MagicMock()):
+            self._captured_xml(
+                driver,
+                cloud_init_user="ubuntu",
+                cloud_init_password_hash="$6$salt$hash",
+                ip_cidr="192.168.1.50/24",
+            )
+
+        cmd = mock_run.call_args[0][0]
+        assert "--network-config" not in cmd
 
 
 # ---------------------------------------------------------------------------

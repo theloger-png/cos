@@ -45,6 +45,8 @@ class TestVmCreateCommand:
             vlan_id=None,
             cloud_init_user="admin",
             cloud_init_password_hash="$6$salt$hash",
+            ip_cidr=None,
+            gateway=None,
         )
 
     @pytest.mark.asyncio
@@ -57,6 +59,26 @@ class TestVmCreateCommand:
         call_kwargs = libvirt.create_vm.call_args
         assert call_kwargs.kwargs.get("cloud_init_user") is None
         assert call_kwargs.kwargs.get("cloud_init_password_hash") is None
+
+    @pytest.mark.asyncio
+    async def test_passes_static_ip_fields(self):
+        libvirt = self._libvirt_mock("static-ip-uuid")
+        payload = {
+            "name": "vm3",
+            "cpu_cores": 2,
+            "ram_mb": 1024,
+            "disk_gb": 10,
+            "cloud_init_user": "admin",
+            "cloud_init_password_hash": "$6$salt$hash",
+            "ip_cidr": "192.168.1.50/24",
+            "gateway": "192.168.1.1",
+        }
+        with patch("agent.ws_server._libvirt", libvirt):
+            result = await _dispatch(AgentCommand(command="vm_create", payload=payload))
+        assert result.success is True
+        call_kwargs = libvirt.create_vm.call_args
+        assert call_kwargs.kwargs.get("ip_cidr") == "192.168.1.50/24"
+        assert call_kwargs.kwargs.get("gateway") == "192.168.1.1"
 
 
 class TestUnknownCommand:
