@@ -21,14 +21,15 @@ export function Tenants() {
 
   const [open, setOpen] = useState(false)
   const [name, setName] = useState('')
+  const [email, setEmail] = useState('')
   const [description, setDescription] = useState('')
 
-  const resetForm = () => { setName(''); setDescription('') }
+  const resetForm = () => { setName(''); setEmail(''); setDescription('') }
 
   const handleCreate = (e: React.FormEvent) => {
     e.preventDefault()
     createTenant.mutate(
-      { name, description: description || undefined },
+      { name, email, description: description || undefined },
       { onSuccess: () => { setOpen(false); resetForm() } },
     )
   }
@@ -92,6 +93,10 @@ export function Tenants() {
                 <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="acme-corp" required />
               </div>
               <div className="space-y-2">
+                <Label>Email *</Label>
+                <Input type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="admin@acme-corp.com" required />
+              </div>
+              <div className="space-y-2">
                 <Label>Description</Label>
                 <Input value={description} onChange={(e) => setDescription(e.target.value)} placeholder="Optional description" />
               </div>
@@ -101,7 +106,7 @@ export function Tenants() {
             )}
             <DialogFooter>
               <Button type="button" variant="outline" onClick={() => setOpen(false)}>Cancel</Button>
-              <Button type="submit" disabled={!name || createTenant.isPending}>
+              <Button type="submit" disabled={!name || !email || createTenant.isPending}>
                 {createTenant.isPending ? 'Creating...' : 'Create'}
               </Button>
             </DialogFooter>

@@ -100,6 +100,7 @@ export interface Tenant {
 
 export interface TenantCreateRequest {
   name: string
+  email: string
   description?: string
 }
 
