@@ -63,6 +63,8 @@ export interface Template {
 
 export interface TemplateCreateRequest {
   name: string
+  os_type: string
+  image_path: string
   cpu_cores: number
   ram_mb: number
   disk_gb: number

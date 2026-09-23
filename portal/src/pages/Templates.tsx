@@ -22,6 +22,8 @@ export function Templates() {
 
   const [open, setOpen] = useState(false)
   const [name, setName] = useState('')
+  const [osType, setOsType] = useState('')
+  const [imagePath, setImagePath] = useState('')
   const [cpu, setCpu] = useState('2')
   const [ram, setRam] = useState('2048')
   const [disk, setDisk] = useState('20')
@@ -29,7 +31,7 @@ export function Templates() {
   const [cloudInitUser, setCloudInitUser] = useState('ubuntu')
 
   const resetForm = () => {
-    setName(''); setCpu('2'); setRam('2048'); setDisk('20'); setDescription(''); setCloudInitUser('ubuntu')
+    setName(''); setOsType(''); setImagePath(''); setCpu('2'); setRam('2048'); setDisk('20'); setDescription(''); setCloudInitUser('ubuntu')
   }
 
   const handleCreate = (e: React.FormEvent) => {
@@ -37,6 +39,8 @@ export function Templates() {
     createTemplate.mutate(
       {
         name,
+        os_type: osType,
+        image_path: imagePath,
         cpu_cores: parseInt(cpu),
         ram_mb: parseInt(ram),
         disk_gb: parseInt(disk),
@@ -128,6 +132,22 @@ export function Templates() {
                 <Label>Name *</Label>
                 <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="ubuntu-22.04-small" required />
               </div>
+              <div className="space-y-2">
+                <Label>OS Type *</Label>
+                <Input value={osType} onChange={(e) => setOsType(e.target.value)} placeholder="ubuntu24.04" required />
+              </div>
+              <div className="space-y-2">
+                <Label>Image Path *</Label>
+                <Input
+                  value={imagePath}
+                  onChange={(e) => setImagePath(e.target.value)}
+                  placeholder="/var/lib/libvirt/images/noble-server-cloudimg-amd64.img"
+                  required
+                />
+                <p className="text-xs text-[var(--muted-foreground)]">
+                  Absolute path to a cloud image file already present on the node.
+                </p>
+              </div>
               <div className="grid grid-cols-3 gap-3">
                 <div className="space-y-2">
                   <Label>CPU Cores</Label>
@@ -160,7 +180,7 @@ export function Templates() {
             )}
             <DialogFooter>
               <Button type="button" variant="outline" onClick={() => setOpen(false)}>Cancel</Button>
-              <Button type="submit" disabled={!name || createTemplate.isPending}>
+              <Button type="submit" disabled={!name || !osType || !imagePath || createTemplate.isPending}>
                 {createTemplate.isPending ? 'Creating...' : 'Create'}
               </Button>
             </DialogFooter>
