@@ -7,6 +7,8 @@ networking: VLAN tagging is applied natively via libvirt domain XML
 (virtualport type='openvswitch' + vlan tag), with no external networking
 daemon or API involved.
 
+Always read STATUS.md before implementing any new module.
+
 ## Components
 - controller/ - Central orchestrator (FastAPI, PostgreSQL)
 - agent/      - Per-node daemon (libvirt, WebSocket server)
