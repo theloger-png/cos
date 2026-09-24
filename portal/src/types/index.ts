@@ -42,6 +42,8 @@ export interface VMCreateRequest {
   disk_gb: number
   tenant_id?: string | null
   network_id?: string | null
+  ip_cidr?: string
+  gateway?: string
 }
 
 export interface VMCreateResponse extends VM {

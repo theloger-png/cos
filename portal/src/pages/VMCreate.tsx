@@ -37,6 +37,8 @@ export function VMCreate() {
   const [templateId, setTemplateId] = useState('')
   const [nodeId, setNodeId] = useState('auto')
   const [networkId, setNetworkId] = useState('none')
+  const [ipCidr, setIpCidr] = useState('')
+  const [gateway, setGateway] = useState('')
   const [cpuCores, setCpuCores] = useState('')
   const [ramMb, setRamMb] = useState('')
   const [diskGb, setDiskGb] = useState('')
@@ -67,6 +69,9 @@ export function VMCreate() {
         ram_mb: ram,
         disk_gb: disk,
         network_id: networkId === 'none' ? null : networkId,
+        ...(ipCidr.trim() && gateway.trim()
+          ? { ip_cidr: ipCidr.trim(), gateway: gateway.trim() }
+          : {}),
       },
       {
         onSuccess: (data) => {
@@ -177,6 +182,34 @@ export function VMCreate() {
                 </SelectContent>
               </Select>
             </div>
+
+            {networkId !== 'none' && (
+              <div className="space-y-2">
+                <div className="grid grid-cols-2 gap-4">
+                  <div className="space-y-2">
+                    <Label htmlFor="ip-cidr">Static IP (CIDR)</Label>
+                    <Input
+                      id="ip-cidr"
+                      value={ipCidr}
+                      onChange={(e) => setIpCidr(e.target.value)}
+                      placeholder="10.0.20.5/24"
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <Label htmlFor="gateway">Gateway</Label>
+                    <Input
+                      id="gateway"
+                      value={gateway}
+                      onChange={(e) => setGateway(e.target.value)}
+                      placeholder="10.0.20.1"
+                    />
+                  </div>
+                </div>
+                <p className="text-xs text-[var(--muted-foreground)]">
+                  Optional. Both fields are required to set a static IP; the guest uses DHCP if left blank.
+                </p>
+              </div>
+            )}
 
             <div className="border-t border-[var(--border)] pt-4">
               <p className="text-xs text-[var(--muted-foreground)] mb-4">
