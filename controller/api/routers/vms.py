@@ -225,11 +225,6 @@ async def create_vm(
     if body.ip_cidr is not None and body.gateway is not None:
         vm_create_payload["ip_cidr"] = body.ip_cidr
         vm_create_payload["gateway"] = body.gateway
-    logger.info(
-        "[DEBUG ip_cidr trace] controller sending payload: ip_cidr=%s, gateway=%s",
-        vm_create_payload.get("ip_cidr"),
-        vm_create_payload.get("gateway"),
-    )
     result = await agent.send_command(node.ip_address, "vm_create", vm_create_payload)
     if result.success:
         vm.libvirt_uuid = result.output.strip()
