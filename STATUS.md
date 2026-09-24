@@ -85,6 +85,9 @@
 ### Phase 1 Remaining
 - feature/ovs-networking branch not yet merged to main
 - Static IP on add-NIC only takes effect for stopped VMs whose seed state was recorded by this version (VMs created earlier keep their seed unchanged and report a nic_failures entry); no live/hot-plug static IP
+- Live NIC IP display and static-IP-on-add-NIC only work for VMs created after these changes (they need the guest-agent channel, qemu-guest-agent and the seed sidecar); no retrofit of older VMs, by design and not planned
+- VM seed ISOs and their .seed.json sidecar files in /var/lib/cos/seeds/ are not cleaned up when a VM is destroyed (pre-existing ISO leak, the sidecar has the same issue)
+- __pycache__/*.pyc files are tracked in git, causing noisy git status after any local test run; should be untracked and added to .gitignore
 - No automated script yet for the full nos-br + OVS internal port + netplan bootstrap from scratch (done manually on cos-node1; see scripts/migrate-mgmt-to-ovs.sh for the migration pattern) - would be a useful addition to scripts/
 - Controller HA (PostgreSQL replication, Keepalived VIP)
 - HTTPS/SSL for portal and API
@@ -156,6 +159,9 @@ All on branch feature/ovs-networking (not yet merged to main).
   - Management IP configured via netplan on the OVS internal port (not the physical NIC)
   - cos-controller VM recreated from scratch with scripts/create-test-vm.sh; controller role installed and validated (login, API key auth working)
   - cos-agent reinstalled on cos-node1 and re-registered with the new controller; heartbeat confirmed online
+- **Fixed: static-IP NICs had no DNS** (commit 059d6c0; found via real-VM testing where apt failed with "Temporary failure resolving archive.ubuntu.com"):
+  - The generated cloud-init network-config had the correct address and gateway/route but no nameservers entry, so static-IP VMs could not resolve names at all (affected both static IP at VM creation and static IP on add-NIC)
+  - Static-IP NICs now include nameservers 1.1.1.1 and 8.8.8.8 (same servers as the project's netplan configs); DHCP NICs are unchanged and still get DNS via DHCP
 - **Fixed** (pre-existing bugs surfaced by the first real UI walkthrough in a while):
   - Tenants create form was missing the required "email" field (form and type updated)
   - Templates create form was missing required "os_type" and "image_path" fields (form and type updated)
