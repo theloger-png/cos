@@ -24,6 +24,11 @@ async def _dispatch(command: AgentCommand) -> AgentCommandResult:
 
     try:
         if cmd == "vm_create":
+            logger.info(
+                "[DEBUG ip_cidr trace] ws_server received payload: ip_cidr=%s, gateway=%s",
+                p.get("ip_cidr"),
+                p.get("gateway"),
+            )
             libvirt_uuid = _libvirt.create_vm(
                 name=p["name"],
                 cpu_cores=p["cpu_cores"],

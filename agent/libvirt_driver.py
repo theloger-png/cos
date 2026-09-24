@@ -239,6 +239,11 @@ class LibvirtDriver:
         gateway: str | None = None,
     ) -> str:
         """Define and start a new KVM domain, returning its libvirt UUID."""
+        logger.info(
+            "[DEBUG ip_cidr trace] create_vm called with: ip_cidr=%s, gateway=%s",
+            ip_cidr,
+            gateway,
+        )
         domain_uuid = str(uuid.uuid4())
         mac_address = _generate_mac()
         os.makedirs(_DISK_BASE_DIR, exist_ok=True)
