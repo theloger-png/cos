@@ -22,6 +22,7 @@ logger = logging.getLogger(__name__)
 
 _DISK_BASE_DIR = "/var/lib/cos/vms"
 _SEED_BASE_DIR = "/var/lib/cos/seeds"
+_STATIC_IP_NAMESERVERS = ("1.1.1.1", "8.8.8.8")
 
 # ---------------------------------------------------------------------------
 # Private helpers
@@ -153,7 +154,7 @@ def _make_cloud_init_network_config_multi(nics: list[dict]) -> str:
 
     Each entry is ``{"mac": str, "ip_cidr": str | None, "gateway": str | None}``.
     Entries with both ip_cidr and gateway get a static address and default
-    route; all others get DHCP. Interfaces are matched by MAC address rather
+    route plus per-interface nameservers; all others get DHCP. Interfaces are matched by MAC address rather
     than name, since the guest-visible interface name (ens3, enp1s0, ...)
     varies by OS and virtio driver, while the MAC is known and fixed at
     domain-definition time.
@@ -179,6 +180,11 @@ def _make_cloud_init_network_config_multi(nics: list[dict]) -> str:
                 # A second default route with the same metric fails to install
                 # on Linux; keep the first NIC's route preferred.
                 lines.append(f"          metric: {1024 * (idx + 1)}")
+            lines += [
+                "      nameservers:",
+                "        addresses:",
+                *(f"          - {dns}" for dns in _STATIC_IP_NAMESERVERS),
+            ]
         else:
             lines.append("      dhcp4: true")
     return "\n".join(lines) + "\n"

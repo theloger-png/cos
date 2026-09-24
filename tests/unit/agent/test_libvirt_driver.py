@@ -1134,6 +1134,38 @@ class TestMakeCloudInitNetworkConfigMulti:
         assert cfg.count("metric:") == 1
         assert "metric: 2048" in cfg
 
+    def test_static_nic_gets_nameservers_block(self):
+        cfg = _make_cloud_init_network_config_multi(
+            [{"mac": "52:54:00:11:22:33", "ip_cidr": "10.0.20.5/24", "gateway": "10.0.20.1"}]
+        )
+        assert (
+            "      nameservers:\n"
+            "        addresses:\n"
+            "          - 1.1.1.1\n"
+            "          - 8.8.8.8\n"
+        ) in cfg
+
+    def test_dhcp_nic_has_no_nameservers(self):
+        cfg = _make_cloud_init_network_config_multi([{"mac": "52:54:00:11:22:33"}])
+        assert "nameservers" not in cfg
+
+    def test_nameservers_only_on_static_nics_in_mixed_config(self):
+        cfg = _make_cloud_init_network_config_multi([
+            {"mac": "52:54:00:11:22:33"},
+            {"mac": "52:54:00:aa:bb:cc", "ip_cidr": "10.0.30.6/24", "gateway": "10.0.30.1"},
+        ])
+        assert cfg.count("nameservers:") == 1
+        assert cfg.index("nameservers:") > cfg.index("52:54:00:aa:bb:cc")
+
+    def test_generated_yaml_is_valid_and_nested_correctly(self):
+        yaml = pytest.importorskip("yaml")
+        cfg = yaml.safe_load(_make_cloud_init_network_config_multi([
+            {"mac": "52:54:00:11:22:33", "ip_cidr": "10.0.20.5/24", "gateway": "10.0.20.1"},
+            {"mac": "52:54:00:aa:bb:cc", "ip_cidr": "10.0.30.6/24", "gateway": "10.0.30.1"},
+        ]))
+        for eth in cfg["network"]["ethernets"].values():
+            assert eth["nameservers"]["addresses"] == ["1.1.1.1", "8.8.8.8"]
+
 
 # ---------------------------------------------------------------------------
 # Seed sidecar written at VM creation
