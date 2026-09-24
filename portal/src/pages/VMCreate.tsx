@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { ArrowLeft, Copy, ShieldAlert } from 'lucide-react'
+import { ArrowLeft, Check, Copy, ShieldAlert } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
@@ -44,6 +44,33 @@ export function VMCreate() {
   const [diskGb, setDiskGb] = useState('')
 
   const [credentials, setCredentials] = useState<Credentials | null>(null)
+  const [copiedField, setCopiedField] = useState<'user' | 'password' | null>(null)
+
+  const copyToClipboard = async (field: 'user' | 'password', text: string) => {
+    try {
+      if (navigator.clipboard && window.isSecureContext) {
+        await navigator.clipboard.writeText(text)
+      } else {
+        // Legacy fallback for non-secure contexts (plain HTTP)
+        const textarea = document.createElement('textarea')
+        textarea.value = text
+        textarea.style.position = 'fixed'
+        textarea.style.opacity = '0'
+        // Attach next to the focused element so the dialog focus trap does not steal focus
+        const host = document.activeElement?.parentElement ?? document.body
+        host.appendChild(textarea)
+        textarea.focus()
+        textarea.select()
+        const ok = document.execCommand('copy')
+        host.removeChild(textarea)
+        if (!ok) throw new Error('execCommand copy failed')
+      }
+      setCopiedField(field)
+      setTimeout(() => setCopiedField(null), 1500)
+    } catch (err) {
+      console.error('Failed to copy to clipboard:', err)
+    }
+  }
 
   const selectedTemplate = templates.find((t) => t.id === templateId)
   const onlineNodes = nodes.filter((n) => n.status === 'online')
@@ -295,9 +322,13 @@ export function VMCreate() {
                   variant="ghost"
                   size="icon"
                   className="h-8 w-8 shrink-0"
-                  onClick={() => navigator.clipboard.writeText(credentials?.user ?? '')}
+                  onClick={() => copyToClipboard('user', credentials?.user ?? '')}
                 >
-                  <Copy className="h-3.5 w-3.5" />
+                  {copiedField === 'user' ? (
+                    <Check className="h-3.5 w-3.5" />
+                  ) : (
+                    <Copy className="h-3.5 w-3.5" />
+                  )}
                 </Button>
               </div>
             </div>
@@ -312,9 +343,13 @@ export function VMCreate() {
                   variant="ghost"
                   size="icon"
                   className="h-8 w-8 shrink-0"
-                  onClick={() => navigator.clipboard.writeText(credentials?.password ?? '')}
+                  onClick={() => copyToClipboard('password', credentials?.password ?? '')}
                 >
-                  <Copy className="h-3.5 w-3.5" />
+                  {copiedField === 'password' ? (
+                    <Check className="h-3.5 w-3.5" />
+                  ) : (
+                    <Copy className="h-3.5 w-3.5" />
+                  )}
                 </Button>
               </div>
             </div>
