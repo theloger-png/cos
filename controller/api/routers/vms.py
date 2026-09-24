@@ -45,6 +45,8 @@ class AddNICRequest(BaseModel):
     """A new NIC to add, identified by a COS Network (resolved to vlan_id by the controller)."""
 
     network_id: uuid.UUID
+    ip_cidr: str | None = None  # optional static IP; applied only if the VM is stopped
+    gateway: str | None = None  # optional static IP gateway; required alongside ip_cidr
 
 
 class RemoveNICRequest(BaseModel):
@@ -451,7 +453,11 @@ async def put_vm_hardware(
             )
         if tenant is not None and network.tenant_id != tenant.id:
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied")
-        resolved_add_nics.append({"vlan_id": network.vlan_id})
+        resolved_nic: dict = {"vlan_id": network.vlan_id}
+        if add_nic.ip_cidr and add_nic.gateway:
+            resolved_nic["ip_cidr"] = add_nic.ip_cidr
+            resolved_nic["gateway"] = add_nic.gateway
+        resolved_add_nics.append(resolved_nic)
 
     changes: dict = {}
     if body.vcpu is not None:

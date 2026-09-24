@@ -199,3 +199,28 @@ class TestTenantInfo:
             created_at=_now(),
         )
         assert t.active is True
+
+
+class TestNICInfo:
+    def test_ip_addresses_defaults_to_empty_list(self):
+        from common.models import NICInfo
+
+        nic = NICInfo(target="vnet0", mac="52:54:00:11:22:33", bridge="nos-br")
+        assert nic.ip_addresses == []
+
+    def test_ip_addresses_default_is_not_shared_between_instances(self):
+        from common.models import NICInfo
+
+        a = NICInfo(target="vnet0", mac="52:54:00:11:22:33", bridge="nos-br")
+        b = NICInfo(target="vnet1", mac="52:54:00:aa:bb:cc", bridge="nos-br")
+        a.ip_addresses.append("10.0.0.1")
+        assert b.ip_addresses == []
+
+    def test_ip_addresses_accepted_from_agent_payload(self):
+        from common.models import VMHardwareConfig
+
+        hw = VMHardwareConfig.model_validate({
+            "vcpu": 1, "memory_mb": 512, "disks": [],
+            "nics": [{"target": "vnet0", "mac": "m", "bridge": "b", "ip_addresses": ["10.0.0.5"]}],
+        })
+        assert hw.nics[0].ip_addresses == ["10.0.0.5"]

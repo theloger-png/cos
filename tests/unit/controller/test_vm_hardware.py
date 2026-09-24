@@ -312,6 +312,67 @@ class TestPutVmHardware:
         assert len(add_nics) == 1
         assert add_nics[0]["vlan_id"] == 202
 
+    async def _put_add_nic(self, add_nic_kwargs: dict) -> dict:
+        from controller.api.routers.vms import put_vm_hardware, VMHardwareChanges, AddNICRequest
+
+        tenant = _make_tenant()
+        node = _make_node()
+        vm = _make_vm(tenant, node)
+        network = _make_network(tenant, vlan_id=202)
+        session = self._build_session(vm, node, network=network)
+
+        agent_result = MagicMock()
+        agent_result.success = True
+        agent_result.output = json.dumps(_hardware_dict(vlan_id=202))
+
+        body = VMHardwareChanges(
+            add_nics=[AddNICRequest(network_id=network.id, **add_nic_kwargs)]
+        )
+        with patch("controller.api.routers.vms.AgentClient") as MockAgent:
+            mock_send = AsyncMock(return_value=agent_result)
+            MockAgent.return_value.send_command = mock_send
+            await put_vm_hardware(vm_id=vm.id, body=body, session=session, auth=(None, None))
+
+        return mock_send.call_args[0][2]["changes"]["add_nics"][0]
+
+    @pytest.mark.asyncio
+    async def test_static_ip_and_gateway_passed_to_agent(self):
+        add_nic = await self._put_add_nic({"ip_cidr": "10.0.30.6/24", "gateway": "10.0.30.1"})
+        assert add_nic == {"vlan_id": 202, "ip_cidr": "10.0.30.6/24", "gateway": "10.0.30.1"}
+
+    @pytest.mark.asyncio
+    async def test_static_ip_omitted_without_gateway(self):
+        add_nic = await self._put_add_nic({"ip_cidr": "10.0.30.6/24"})
+        assert add_nic == {"vlan_id": 202}
+
+    @pytest.mark.asyncio
+    async def test_static_ip_omitted_without_ip_cidr(self):
+        add_nic = await self._put_add_nic({"gateway": "10.0.30.1"})
+        assert add_nic == {"vlan_id": 202}
+
+    @pytest.mark.asyncio
+    async def test_nic_ip_addresses_flow_through_to_response(self):
+        from controller.api.routers.vms import put_vm_hardware, VMHardwareChanges
+
+        tenant = _make_tenant()
+        node = _make_node()
+        vm = _make_vm(tenant, node)
+        session = self._build_session(vm, node)
+
+        config = _hardware_dict(vlan_id=None)
+        config["nics"][0]["ip_addresses"] = ["10.0.20.5"]
+        agent_result = MagicMock()
+        agent_result.success = True
+        agent_result.output = json.dumps(config)
+
+        with patch("controller.api.routers.vms.AgentClient") as MockAgent:
+            MockAgent.return_value.send_command = AsyncMock(return_value=agent_result)
+            result = await put_vm_hardware(
+                vm_id=vm.id, body=VMHardwareChanges(vcpu=4), session=session, auth=(None, None)
+            )
+
+        assert result.nics[0].ip_addresses == ["10.0.20.5"]
+
     @pytest.mark.asyncio
     async def test_raises_404_for_unknown_network(self):
         from fastapi import HTTPException

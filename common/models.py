@@ -104,14 +104,17 @@ class DiskInfo(BaseModel):
 class NICInfo(BaseModel):
     """Network interface attached to a VM.
 
-    vlan_id is populated by the agent via NOS config lookup.
-    network_id / network_name are optionally enriched by the controller.
+    vlan_id is read by the agent from the domain XML's OVS VLAN tag.
+    ip_addresses holds the NIC's live IPv4 addresses (empty when the VM is
+    stopped or none are known). network_id / network_name are optionally
+    enriched by the controller.
     """
 
     target: str
     mac: str
     bridge: str
     vlan_id: Optional[int] = None
+    ip_addresses: list[str] = Field(default_factory=list)
     network_id: Optional[uuid.UUID] = None
     network_name: Optional[str] = None
 

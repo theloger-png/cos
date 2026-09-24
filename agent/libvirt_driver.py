@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import contextlib
+import ipaddress
 import json
 import logging
 import os
@@ -139,26 +141,180 @@ def _make_cloud_init_meta_data(vm_name: str, instance_id: str) -> str:
     )
 
 
-def _make_cloud_init_network_config(mac_address: str, ip_cidr: str, gateway: str) -> str:
-    """Return cloud-init network-config v2 YAML for a single static-IP interface.
+def _make_cloud_init_network_config_multi(nics: list[dict]) -> str:
+    """Return cloud-init network-config v2 YAML for one or more interfaces.
 
-    The interface is matched by MAC address rather than name, since the
-    guest-visible interface name (ens3, enp1s0, ...) varies by OS and virtio
-    driver, while the MAC is known and fixed at domain-definition time.
+    Each entry is ``{"mac": str, "ip_cidr": str | None, "gateway": str | None}``.
+    Entries with both ip_cidr and gateway get a static address and default
+    route; all others get DHCP. Interfaces are matched by MAC address rather
+    than name, since the guest-visible interface name (ens3, enp1s0, ...)
+    varies by OS and virtio driver, while the MAC is known and fixed at
+    domain-definition time.
+
+    Every NIC that should be configured must be listed: a supplied
+    network-config replaces cloud-init's automatic DHCP fallback for
+    interfaces it does not mention.
     """
-    return (
-        "network:\n"
-        "  version: 2\n"
-        "  ethernets:\n"
-        "    eth0:\n"
-        "      match:\n"
-        f"        macaddress: '{mac_address}'\n"
-        "      addresses:\n"
-        f"        - {ip_cidr}\n"
-        "      routes:\n"
-        "        - to: default\n"
-        f"          via: {gateway}\n"
+    lines = ["network:", "  version: 2", "  ethernets:"]
+    for idx, nic in enumerate(nics):
+        lines += [f"    eth{idx}:", "      match:", f"        macaddress: '{nic['mac']}'"]
+        ip_cidr = nic.get("ip_cidr")
+        gateway = nic.get("gateway")
+        if ip_cidr and gateway:
+            lines += [
+                "      addresses:",
+                f"        - {ip_cidr}",
+                "      routes:",
+                "        - to: default",
+                f"          via: {gateway}",
+            ]
+            if idx > 0:
+                # A second default route with the same metric fails to install
+                # on Linux; keep the first NIC's route preferred.
+                lines.append(f"          metric: {1024 * (idx + 1)}")
+        else:
+            lines.append("      dhcp4: true")
+    return "\n".join(lines) + "\n"
+
+
+def _make_cloud_init_network_config(mac_address: str, ip_cidr: str, gateway: str) -> str:
+    """Return cloud-init network-config v2 YAML for a single static-IP interface."""
+    return _make_cloud_init_network_config_multi(
+        [{"mac": mac_address, "ip_cidr": ip_cidr, "gateway": gateway}]
     )
+
+
+def _seed_iso_path(vm_uuid: str) -> str:
+    """Return the cloud-init seed ISO path for a domain."""
+    return os.path.join(_SEED_BASE_DIR, f"{vm_uuid}.iso")
+
+
+def _seed_state_path(vm_uuid: str) -> str:
+    """Return the path of the JSON sidecar recording what went into a domain's seed ISO."""
+    return os.path.join(_SEED_BASE_DIR, f"{vm_uuid}.seed.json")
+
+
+def _load_seed_state(vm_uuid: str) -> dict | None:
+    """Load the seed sidecar ({user_data, nics}) for a domain, or None if absent/unreadable."""
+    try:
+        with open(_seed_state_path(vm_uuid)) as f:
+            state = json.load(f)
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError) as exc:
+        logger.warning("Unreadable seed state for %s: %s", vm_uuid, exc)
+        return None
+    if not isinstance(state, dict) or not isinstance(state.get("user_data"), str):
+        return None
+    if not isinstance(state.get("nics"), list):
+        state["nics"] = []
+    return state
+
+
+def _save_seed_state(vm_uuid: str, user_data: str, nic_configs: list[dict]) -> None:
+    """Record the seed's user-data and static NIC configs so the seed can be rebuilt later.
+
+    The ISO itself is not parsed back because it cannot be read without extra
+    tooling on the node. The file holds the password hash, so it is created 0600.
+    """
+    static = [
+        {"mac": n["mac"], "ip_cidr": n["ip_cidr"], "gateway": n["gateway"]}
+        for n in nic_configs
+        if n.get("ip_cidr") and n.get("gateway")
+    ]
+    try:
+        with open(
+            _seed_state_path(vm_uuid), "w", opener=lambda p, flags: os.open(p, flags, 0o600)
+        ) as f:
+            json.dump({"user_data": user_data, "nics": static}, f)
+    except OSError as exc:
+        logger.warning("Failed to save seed state for %s: %s", vm_uuid, exc)
+
+
+def _run_cloud_localds(
+    vm_name: str, user_data: str, nic_configs: list[dict], output_path: str
+) -> bool:
+    """Build a cloud-init seed ISO at *output_path*. Returns True on success.
+
+    Uses a random UUID as instance-id on every call to avoid cloud-init
+    skipping re-configuration when an image is reused across VMs or a seed is
+    rebuilt for an existing one. When *nic_configs* is non-empty a
+    network-config v2 file is generated from it and passed via
+    --network-config; when empty the guest keeps its default DHCP behavior.
+    """
+    meta_data = _make_cloud_init_meta_data(vm_name, str(uuid.uuid4()))
+    try:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            user_data_path = os.path.join(tmpdir, "user-data")
+            meta_data_path = os.path.join(tmpdir, "meta-data")
+            with open(user_data_path, "w") as f:
+                f.write(user_data)
+            with open(meta_data_path, "w") as f:
+                f.write(meta_data)
+
+            cmd = ["cloud-localds", output_path, user_data_path, meta_data_path]
+            if nic_configs:
+                network_config_path = os.path.join(tmpdir, "network-config")
+                with open(network_config_path, "w") as f:
+                    f.write(_make_cloud_init_network_config_multi(nic_configs))
+                cmd += ["--network-config", network_config_path]
+
+            result = subprocess.run(cmd, capture_output=True, text=True)
+            if result.returncode != 0:
+                logger.error("cloud-localds failed for %s: %s", vm_name, result.stderr)
+                return False
+    except Exception as exc:
+        logger.error("Failed to build cloud-init seed for %s: %s", vm_name, exc)
+        return False
+    return True
+
+
+def _collect_interface_ipv4(domain: libvirt.virDomain, source: int) -> dict[str, list[str]]:
+    """Return {lower-case MAC: [IPv4 addresses]} from one interfaceAddresses() source.
+
+    Returns an empty dict when the source is unavailable (domain not running,
+    guest agent not responding, ...). Loopback and link-local addresses are skipped.
+    """
+    try:
+        ifaces = domain.interfaceAddresses(source)
+    except libvirt.libvirtError as exc:
+        logger.debug("interfaceAddresses(source=%s) unavailable: %s", source, exc)
+        return {}
+
+    result: dict[str, list[str]] = {}
+    for iface in ifaces.values():
+        hwaddr = iface.get("hwaddr")
+        if not hwaddr:
+            continue
+        for addr in iface.get("addrs") or []:
+            if addr.get("type") != libvirt.VIR_IP_ADDR_TYPE_IPV4:
+                continue
+            ip = addr.get("addr")
+            try:
+                parsed = ipaddress.IPv4Address(ip)
+            except ValueError:
+                continue
+            if parsed.is_loopback or parsed.is_link_local:
+                continue
+            ips = result.setdefault(hwaddr.lower(), [])
+            if ip not in ips:
+                ips.append(ip)
+    return result
+
+
+def _lookup_nic_ips(domain: libvirt.virDomain, macs: list[str]) -> dict[str, list[str]]:
+    """Return {lower-case MAC: [IPv4]} for *macs*, preferring the guest agent over ARP.
+
+    The ARP source (host neighbour table) is only queried when the guest agent
+    is unavailable or knows no address for at least one of the NICs.
+    """
+    ips = _collect_interface_ipv4(domain, libvirt.VIR_DOMAIN_INTERFACE_ADDRESSES_SRC_AGENT)
+    if any(not ips.get(m) for m in macs):
+        arp_ips = _collect_interface_ipv4(domain, libvirt.VIR_DOMAIN_INTERFACE_ADDRESSES_SRC_ARP)
+        for m in macs:
+            if not ips.get(m) and arp_ips.get(m):
+                ips[m] = arp_ips[m]
+    return ips
 
 
 class LibvirtDriver:
@@ -180,50 +336,99 @@ class LibvirtDriver:
         vm_uuid: str,
         cloud_init_user: str,
         cloud_init_password_hash: str,
-        network_config: str | None = None,
+        nic_configs: list[dict] | None = None,
     ) -> str | None:
         """Build a cloud-init seed ISO and return its path, or None on failure.
 
-        Uses a random UUID as instance-id on every call to avoid cloud-init
-        skipping re-configuration when an image is reused across VMs.
+        When *nic_configs* is non-empty ([{mac, ip_cidr, gateway}, ...]), a
+        network-config v2 file is generated from it and passed to
+        cloud-localds, configuring static IPs on the guest's NICs. When
+        omitted, no network-config file is added and the guest falls back to
+        its default DHCP behavior.
 
-        When *network_config* is given, it is written as a network-config v2
-        file and passed to cloud-localds via --network-config, configuring a
-        static IP on the guest's NIC. When omitted, no network-config file is
-        added and the guest falls back to its default DHCP behavior.
+        On success the seed's inputs are recorded in a JSON sidecar so the
+        seed can later be rebuilt (see _apply_static_ip_to_seed).
         """
         os.makedirs(_SEED_BASE_DIR, exist_ok=True)
-        seed_path = os.path.join(_SEED_BASE_DIR, f"{vm_uuid}.iso")
-        instance_id = str(uuid.uuid4())
-
+        seed_path = _seed_iso_path(vm_uuid)
+        nic_configs = nic_configs or []
         user_data = _make_cloud_init_user_data(cloud_init_user, cloud_init_password_hash)
-        meta_data = _make_cloud_init_meta_data(vm_name, instance_id)
 
-        try:
-            with tempfile.TemporaryDirectory() as tmpdir:
-                user_data_path = os.path.join(tmpdir, "user-data")
-                meta_data_path = os.path.join(tmpdir, "meta-data")
-                with open(user_data_path, "w") as f:
-                    f.write(user_data)
-                with open(meta_data_path, "w") as f:
-                    f.write(meta_data)
-
-                cmd = ["cloud-localds", seed_path, user_data_path, meta_data_path]
-                if network_config:
-                    network_config_path = os.path.join(tmpdir, "network-config")
-                    with open(network_config_path, "w") as f:
-                        f.write(network_config)
-                    cmd += ["--network-config", network_config_path]
-
-                result = subprocess.run(cmd, capture_output=True, text=True)
-                if result.returncode != 0:
-                    logger.error("cloud-localds failed for %s: %s", vm_name, result.stderr)
-                    return None
-        except Exception as exc:
-            logger.error("Failed to build cloud-init seed for %s: %s", vm_name, exc)
+        if not _run_cloud_localds(vm_name, user_data, nic_configs, seed_path):
             return None
-
+        _save_seed_state(vm_uuid, user_data, nic_configs)
         return seed_path
+
+    def _apply_static_ip_to_seed(
+        self,
+        domain: libvirt.virDomain,
+        vm_uuid: str,
+        mac: str,
+        ip_cidr: str,
+        gateway: str,
+    ) -> str | None:
+        """Rebuild a stopped domain's cloud-init seed so NIC *mac* gets a static IP.
+
+        Returns None on success, or a human-readable failure reason. Static
+        entries already recorded for other NICs are kept; every other NIC in
+        the domain is listed with DHCP, because a network-config replaces
+        cloud-init's automatic DHCP fallback for interfaces it omits. If the
+        domain has no seed yet, a new one with empty user-data is created and
+        attached. If a seed ISO exists but its inputs were never recorded
+        (created before the sidecar existed), it is left untouched because its
+        user-data cannot be recovered.
+        """
+        seed_path = _seed_iso_path(vm_uuid)
+        state = _load_seed_state(vm_uuid)
+        if state is None:
+            if os.path.exists(seed_path):
+                return (
+                    "existing cloud-init seed has no recorded state to merge with "
+                    "(created before static IP support); left unchanged"
+                )
+            state = {"user_data": "#cloud-config\n", "nics": []}
+
+        root = ET.fromstring(domain.XMLDesc(libvirt.VIR_DOMAIN_XML_INACTIVE))
+        macs = [m.get("address", "") for m in root.findall(".//interface/mac") if m.get("address")]
+        if mac.lower() not in {m.lower() for m in macs}:
+            macs.append(mac)
+
+        static = {n["mac"].lower(): n for n in state["nics"]}
+        static[mac.lower()] = {"ip_cidr": ip_cidr, "gateway": gateway}
+        nic_configs = [
+            {
+                "mac": m,
+                "ip_cidr": static.get(m.lower(), {}).get("ip_cidr"),
+                "gateway": static.get(m.lower(), {}).get("gateway"),
+            }
+            for m in macs
+        ]
+
+        os.makedirs(_SEED_BASE_DIR, exist_ok=True)
+        tmp_path = f"{seed_path}.tmp"
+        if not _run_cloud_localds(domain.name(), state["user_data"], nic_configs, tmp_path):
+            with contextlib.suppress(OSError):
+                os.remove(tmp_path)
+            return "cloud-localds failed while rebuilding the cloud-init seed"
+        try:
+            os.replace(tmp_path, seed_path)
+        except OSError as exc:
+            return f"could not install rebuilt cloud-init seed: {exc}"
+        _save_seed_state(vm_uuid, state["user_data"], nic_configs)
+
+        attached = any(
+            src.get("file") == seed_path
+            for src in root.findall(".//disk[@device='cdrom']/source")
+        )
+        if not attached:
+            try:
+                domain.attachDeviceFlags(
+                    _SEED_DISK_BLOCK.format(seed_path=seed_path),
+                    libvirt.VIR_DOMAIN_AFFECT_CONFIG,
+                )
+            except libvirt.libvirtError as exc:
+                return f"rebuilt cloud-init seed could not be attached: {exc}"
+        return None
 
     def create_vm(
         self,
@@ -259,17 +464,15 @@ class LibvirtDriver:
 
         seed_disk_block = ""
         if cloud_init_user and cloud_init_password_hash:
-            network_config = None
+            nic_configs = []
             if ip_cidr and gateway:
-                network_config = _make_cloud_init_network_config(
-                    mac_address=mac_address, ip_cidr=ip_cidr, gateway=gateway
-                )
+                nic_configs = [{"mac": mac_address, "ip_cidr": ip_cidr, "gateway": gateway}]
             seed_path = self._build_cloud_init_seed(
                 vm_name=name,
                 vm_uuid=domain_uuid,
                 cloud_init_user=cloud_init_user,
                 cloud_init_password_hash=cloud_init_password_hash,
-                network_config=network_config,
+                nic_configs=nic_configs,
             )
             if seed_path:
                 seed_disk_block = _SEED_DISK_BLOCK.format(seed_path=seed_path)
@@ -426,19 +629,28 @@ class LibvirtDriver:
         """Return the current hardware configuration of a domain as a plain dict.
 
         Shape: {vcpu, memory_mb, disks: [{target, size_gb, path, device}],
-                nics: [{target, mac, bridge, vlan_id}]}
+                nics: [{target, mac, bridge, vlan_id, ip_addresses}]}
 
         Each NIC's vlan_id is read directly from its own <vlan><tag id='X'/></vlan>
         element in the domain XML, applied natively by libvirt+OVS.
+
+        ip_addresses holds the NIC's live IPv4 addresses, matched by MAC: the
+        qemu-guest-agent is asked first, falling back to the host ARP table.
+        It is empty for stopped domains.
         """
         conn = self._connect()
         try:
             domain = conn.lookupByUUIDString(libvirt_uuid)
             xml_str = domain.XMLDesc(0)
+            root = ET.fromstring(xml_str)
+            nic_macs = [
+                m.get("address", "").lower()
+                for m in root.findall(".//interface[@type='bridge']/mac")
+                if m.get("address")
+            ]
+            ip_map = _lookup_nic_ips(domain, nic_macs)
         finally:
             conn.close()
-
-        root = ET.fromstring(xml_str)
 
         # --- vCPU ---
         vcpu_elem = root.find("vcpu")
@@ -474,7 +686,13 @@ class LibvirtDriver:
             bridge = source.get("bridge", "") if source is not None else ""
             vnet = target.get("dev", "") if target is not None else ""
             vlan_id = int(tag_elem.get("id")) if tag_elem is not None and tag_elem.get("id") else None
-            nics.append({"target": vnet, "mac": mac, "bridge": bridge, "vlan_id": vlan_id})
+            nics.append({
+                "target": vnet,
+                "mac": mac,
+                "bridge": bridge,
+                "vlan_id": vlan_id,
+                "ip_addresses": ip_map.get(mac.lower(), []),
+            })
 
         return {"vcpu": vcpu, "memory_mb": memory_mb, "disks": disks, "nics": nics}
 
@@ -493,8 +711,12 @@ class LibvirtDriver:
             vcpu (int): new vCPU count
             memory_mb (int): new RAM in MiB
             add_disks (list[{size_gb}]): new secondary disks to create and attach
-            add_nics (list[{vlan_id}]): new NICs to attach on *bridge*, VLAN-tagged
-                natively by libvirt+OVS
+            add_nics (list[{vlan_id, ip_cidr?, gateway?}]): new NICs to attach on
+                *bridge*, VLAN-tagged natively by libvirt+OVS. When ip_cidr and
+                gateway are both given and the domain is shut off, its cloud-init
+                seed is rebuilt to configure the static IP on next boot; on any
+                other state the NIC is attached without it and a nic_failures
+                entry explains why.
             remove_nics (list[{target}]): existing NIC target names to detach
 
         Apply order:
@@ -567,11 +789,16 @@ class LibvirtDriver:
             # ── Step 2: NIC additions ─────────────────────────────────────
             for nic in add_nics:
                 vlan_id = nic.get("vlan_id")
+                ip_cidr = nic.get("ip_cidr")
+                gateway = nic.get("gateway")
+                # Explicit MAC so the guest network-config can match this NIC.
+                new_mac = _generate_mac()
                 vlan_fragment = (
                     _INTERFACE_VLAN_BLOCK.format(vlan_id=vlan_id) if vlan_id is not None else ""
                 )
                 nic_xml = (
                     f"<interface type='bridge'>"
+                    f"<mac address='{new_mac}'/>"
                     f"<source bridge='{self._bridge}'/>"
                     f"<model type='virtio'/>"
                     f"{vlan_fragment}"
@@ -595,6 +822,31 @@ class LibvirtDriver:
                         "reason": reason,
                     })
                     continue
+
+                if ip_cidr and gateway:
+                    nic_label = f"new-nic (vlan {vlan_id})"
+                    if state != libvirt.VIR_DOMAIN_SHUTOFF:
+                        reason = (
+                            "static IP requires the VM to be stopped - NIC attached "
+                            "without static IP configuration, guest will need manual "
+                            "network configuration or a reboot after adding a "
+                            "network-config"
+                        )
+                        logger.warning("%s (%s)", reason, nic_label)
+                        nic_failures.append({"target": nic_label, "reason": reason})
+                    else:
+                        seed_failure = self._apply_static_ip_to_seed(
+                            domain, libvirt_uuid, new_mac, ip_cidr, gateway
+                        )
+                        if seed_failure:
+                            logger.error("static IP for %s failed: %s", nic_label, seed_failure)
+                            nic_failures.append({
+                                "target": nic_label,
+                                "reason": (
+                                    "NIC attached but static IP not configured: "
+                                    f"{seed_failure}"
+                                ),
+                            })
 
             # ── Step 3: Shutdown → modify XML → redefine → start ─────────
             if needs_reboot:

@@ -84,7 +84,7 @@
 
 ### Phase 1 Remaining
 - feature/ovs-networking branch not yet merged to main
-- Multi-NIC support for static IP configuration (currently single-NIC only)
+- Static IP on add-NIC only takes effect for stopped VMs whose seed state was recorded by this version (VMs created earlier keep their seed unchanged and report a nic_failures entry); no live/hot-plug static IP
 - No automated script yet for the full nos-br + OVS internal port + netplan bootstrap from scratch (done manually on cos-node1; see scripts/migrate-mgmt-to-ovs.sh for the migration pattern) - would be a useful addition to scripts/
 - Controller HA (PostgreSQL replication, Keepalived VIP)
 - HTTPS/SSL for portal and API
@@ -140,6 +140,15 @@ All on branch feature/ovs-networking (not yet merged to main).
   - agent/libvirt_driver.py generates a MAC address explicitly for each VM NIC and, when a static IP is given, writes a cloud-init network-config v2 file (matched by MAC) into the seed ISO via cloud-localds --network-config; with no IP the guest uses DHCP (unchanged default)
   - Portal (VMCreate.tsx): optional "Static IP (CIDR)" and "Gateway" fields, shown when a Network is selected
   - Validated end-to-end on cos-node1/cos-controller: static IP applied inside the guest via cloud-init
+- **New feature: live IP addresses in the hardware editor**:
+  - agent get_vm_config() adds ip_addresses (IPv4 only) to each NIC via domain.interfaceAddresses(): qemu-guest-agent first, host ARP table as per-NIC fallback, matched by MAC; empty list for stopped VMs
+  - Portal VMHardware.tsx shows them under each NIC's MAC
+- **New feature: optional static IP when adding a NIC** (VM must be stopped):
+  - AddNICRequest gains ip_cidr/gateway (both required, otherwise ignored); agent generates the new NIC's MAC explicitly and, if the domain is shut off, rebuilds its cloud-init seed ISO with a multi-NIC network-config
+  - Every NIC in the domain is listed in the rebuilt network-config (recorded static entries kept, others DHCP) because a supplied network-config replaces cloud-init's DHCP fallback for unlisted interfaces
+  - Seed inputs (user-data + static NICs) are now recorded in /var/lib/cos/seeds/<uuid>.seed.json (0600) at VM creation so the seed can be rebuilt without parsing the ISO; the rebuild uses a fresh instance-id, so cloud-init re-runs on next boot
+  - Running/paused VMs: NIC is attached without static IP and a nic_failures entry says why
+  - Seed ISOs and sidecars are not yet removed on VM destroy (pre-existing gap for the ISO)
 - **Infrastructure migration validated on cos-node1** (fresh Ubuntu 24.04 install):
   - NOS uninstalled/unused; OVS installed via cos-install.sh
   - Topology: single OVS bridge "nos-br" carries both physical trunk uplinks (1G management-facing NIC and 10G data-facing NIC) plus an OVS internal port ("mgmtNNN", tagged with the management VLAN) for the node's own management IP, so VMs on the management VLAN reach the node locally over the bridge without traversing the physical switch

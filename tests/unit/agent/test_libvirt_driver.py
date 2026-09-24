@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import uuid
+import xml.etree.ElementTree as ET
 from unittest.mock import MagicMock, patch, call
 
 import pytest
@@ -12,6 +13,7 @@ from agent.libvirt_driver import (
     _make_cloud_init_user_data,
     _make_cloud_init_meta_data,
     _make_cloud_init_network_config,
+    _make_cloud_init_network_config_multi,
     _generate_mac,
     _mem_to_mib,
     _disk_size_gb,
@@ -942,3 +944,395 @@ class TestApplyVmConfigDiskAdd:
         xml_arg = conn.defineXML.call_args[0][0]
         # vda already exists in sample XML, next should be vdb
         assert "vdb" in xml_arg
+
+
+# ---------------------------------------------------------------------------
+# get_vm_config: live IP addresses
+# ---------------------------------------------------------------------------
+
+import libvirt as _libvirt  # noqa: E402
+
+_SRC_AGENT = _libvirt.VIR_DOMAIN_INTERFACE_ADDRESSES_SRC_AGENT
+_SRC_ARP = _libvirt.VIR_DOMAIN_INTERFACE_ADDRESSES_SRC_ARP
+_IPV4 = _libvirt.VIR_IP_ADDR_TYPE_IPV4
+_IPV6 = _libvirt.VIR_IP_ADDR_TYPE_IPV6
+
+_TWO_NIC_DOMAIN_XML = _SAMPLE_DOMAIN_XML.replace(
+    "  </devices>",
+    "    <interface type='bridge'>\n"
+    "      <mac address='52:54:00:aa:bb:cc'/>\n"
+    "      <source bridge='nos-br'/>\n"
+    "      <target dev='vnet1'/>\n"
+    "      <model type='virtio'/>\n"
+    "    </interface>\n"
+    "  </devices>",
+)
+
+
+def _iface(mac: str, *addrs: tuple[int, str]) -> dict:
+    return {
+        "hwaddr": mac,
+        "addrs": [{"type": t, "addr": a, "prefix": 24} for t, a in addrs],
+    }
+
+
+class TestGetVmConfigIpAddresses:
+    def _run(self, sources: dict, xml: str = _SAMPLE_DOMAIN_XML):
+        """*sources* maps a libvirt source constant to a dict result or an exception."""
+        domain = _mock_domain_for_config(xml)
+
+        def interface_addresses(source, flags=0):
+            result = sources.get(source, {})
+            if isinstance(result, Exception):
+                raise result
+            return result
+
+        domain.interfaceAddresses.side_effect = interface_addresses
+        conn = MagicMock()
+        conn.lookupByUUIDString.return_value = domain
+        driver = LibvirtDriver(uri="qemu:///system", bridge="nos-br")
+        with patch("libvirt.open", return_value=conn), \
+             patch("os.path.exists", return_value=True), \
+             patch("subprocess.run", return_value=MagicMock(returncode=1)):
+            result = driver.get_vm_config("abc-123")
+        return domain, result
+
+    def test_guest_agent_ips_used_and_arp_not_queried(self):
+        domain, result = self._run({
+            _SRC_AGENT: {"ens3": _iface("52:54:00:11:22:33", (_IPV4, "10.0.20.5"))},
+        })
+        assert result["nics"][0]["ip_addresses"] == ["10.0.20.5"]
+        sources = [c[0][0] for c in domain.interfaceAddresses.call_args_list]
+        assert sources == [_SRC_AGENT]
+
+    def test_falls_back_to_arp_when_agent_raises(self):
+        domain, result = self._run({
+            _SRC_AGENT: _libvirt.libvirtError("Guest agent is not responding"),
+            _SRC_ARP: {"vnet0": _iface("52:54:00:11:22:33", (_IPV4, "10.0.20.7"))},
+        })
+        assert result["nics"][0]["ip_addresses"] == ["10.0.20.7"]
+        sources = [c[0][0] for c in domain.interfaceAddresses.call_args_list]
+        assert sources == [_SRC_AGENT, _SRC_ARP]
+
+    def test_falls_back_to_arp_when_agent_has_no_addresses_for_mac(self):
+        _, result = self._run({
+            _SRC_AGENT: {"ens9": _iface("52:54:00:99:99:99", (_IPV4, "10.9.9.9"))},
+            _SRC_ARP: {"vnet0": _iface("52:54:00:11:22:33", (_IPV4, "10.0.20.8"))},
+        })
+        assert result["nics"][0]["ip_addresses"] == ["10.0.20.8"]
+
+    def test_stopped_domain_returns_empty_ip_list(self):
+        not_running = _libvirt.libvirtError("Requested operation is not valid: domain is not running")
+        _, result = self._run({_SRC_AGENT: not_running, _SRC_ARP: not_running})
+        assert result["nics"][0]["ip_addresses"] == []
+        assert result["vcpu"] == 2
+
+    def test_only_global_ipv4_addresses_are_returned(self):
+        _, result = self._run({
+            _SRC_AGENT: {
+                "lo": _iface("52:54:00:11:22:33", (_IPV4, "127.0.0.1")),
+                "ens3": _iface(
+                    "52:54:00:11:22:33",
+                    (_IPV4, "10.0.20.5"),
+                    (_IPV4, "169.254.10.3"),
+                    (_IPV6, "fe80::5054:ff:fe11:2233"),
+                    (_IPV4, "10.0.20.5"),
+                ),
+            },
+        })
+        assert result["nics"][0]["ip_addresses"] == ["10.0.20.5"]
+
+    def test_interfaces_without_hwaddr_are_ignored(self):
+        _, result = self._run({
+            _SRC_AGENT: {"lo": {"hwaddr": None, "addrs": [{"type": _IPV4, "addr": "10.1.1.1", "prefix": 8}]}},
+        })
+        assert result["nics"][0]["ip_addresses"] == []
+
+    def test_multi_nic_matched_by_mac_with_per_nic_fallback(self):
+        """NIC 1 resolved by the agent, NIC 2 only known to the ARP table."""
+        _, result = self._run(
+            {
+                _SRC_AGENT: {"ens3": _iface("52:54:00:11:22:33", (_IPV4, "10.0.20.5"))},
+                _SRC_ARP: {"vnet1": _iface("52:54:00:AA:BB:CC", (_IPV4, "10.0.30.6"))},
+            },
+            xml=_TWO_NIC_DOMAIN_XML,
+        )
+        by_target = {n["target"]: n["ip_addresses"] for n in result["nics"]}
+        assert by_target == {"vnet0": ["10.0.20.5"], "vnet1": ["10.0.30.6"]}
+
+
+# ---------------------------------------------------------------------------
+# Multi-NIC cloud-init network-config
+# ---------------------------------------------------------------------------
+
+
+class TestMakeCloudInitNetworkConfigMulti:
+    def test_single_static_entry_matches_single_nic_helper(self):
+        nic = {"mac": "52:54:00:ab:cd:ef", "ip_cidr": "192.168.1.50/24", "gateway": "192.168.1.1"}
+        assert _make_cloud_init_network_config_multi([nic]) == _make_cloud_init_network_config(
+            "52:54:00:ab:cd:ef", "192.168.1.50/24", "192.168.1.1"
+        )
+
+    def test_entry_without_static_ip_uses_dhcp(self):
+        cfg = _make_cloud_init_network_config_multi([{"mac": "52:54:00:11:22:33"}])
+        assert "macaddress: '52:54:00:11:22:33'" in cfg
+        assert "dhcp4: true" in cfg
+        assert "addresses:" not in cfg
+
+    def test_entry_with_only_one_of_ip_or_gateway_uses_dhcp(self):
+        cfg = _make_cloud_init_network_config_multi(
+            [{"mac": "52:54:00:11:22:33", "ip_cidr": "10.0.0.5/24", "gateway": None}]
+        )
+        assert "dhcp4: true" in cfg
+        assert "10.0.0.5/24" not in cfg
+
+    def test_multiple_nics_get_unique_ids_and_macs(self):
+        cfg = _make_cloud_init_network_config_multi([
+            {"mac": "52:54:00:11:22:33"},
+            {"mac": "52:54:00:aa:bb:cc", "ip_cidr": "10.0.30.6/24", "gateway": "10.0.30.1"},
+        ])
+        assert "    eth0:" in cfg and "    eth1:" in cfg
+        assert "macaddress: '52:54:00:11:22:33'" in cfg
+        assert "macaddress: '52:54:00:aa:bb:cc'" in cfg
+        assert "- 10.0.30.6/24" in cfg
+
+    def test_secondary_static_default_route_gets_higher_metric(self):
+        cfg = _make_cloud_init_network_config_multi([
+            {"mac": "52:54:00:11:22:33", "ip_cidr": "10.0.20.5/24", "gateway": "10.0.20.1"},
+            {"mac": "52:54:00:aa:bb:cc", "ip_cidr": "10.0.30.6/24", "gateway": "10.0.30.1"},
+        ])
+        assert cfg.count("metric:") == 1
+        assert "metric: 2048" in cfg
+
+
+# ---------------------------------------------------------------------------
+# Seed sidecar written at VM creation
+# ---------------------------------------------------------------------------
+
+
+def _fake_cloud_localds(captured: list[dict] | None = None, returncode: int = 0):
+    """subprocess.run stand-in that creates the ISO and records the inputs it was given."""
+
+    def run(cmd, **kwargs):
+        if captured is not None:
+            record = {"cmd": cmd, "user_data": open(cmd[2]).read()}
+            if "--network-config" in cmd:
+                record["network_config"] = open(cmd[cmd.index("--network-config") + 1]).read()
+            captured.append(record)
+        if returncode == 0:
+            with open(cmd[1], "w") as f:
+                f.write("iso")
+        return MagicMock(returncode=returncode, stderr="boom" if returncode else "")
+
+    return run
+
+
+class TestSeedStateSidecar:
+    def test_sidecar_records_user_data_and_static_nic(self, driver, tmp_path, monkeypatch):
+        monkeypatch.setattr("agent.libvirt_driver._SEED_BASE_DIR", str(tmp_path))
+        nic = {"mac": "52:54:00:11:22:33", "ip_cidr": "10.0.20.5/24", "gateway": "10.0.20.1"}
+        with patch("subprocess.run", side_effect=_fake_cloud_localds()):
+            path = driver._build_cloud_init_seed("vm", "u-1", "ubuntu", "$6$s$h", nic_configs=[nic])
+
+        assert path == str(tmp_path / "u-1.iso")
+        state = json.loads((tmp_path / "u-1.seed.json").read_text())
+        assert state["nics"] == [nic]
+        assert "$6$s$h" in state["user_data"]
+
+    def test_sidecar_has_no_nics_for_dhcp_vm_and_is_private(self, driver, tmp_path, monkeypatch):
+        monkeypatch.setattr("agent.libvirt_driver._SEED_BASE_DIR", str(tmp_path))
+        with patch("subprocess.run", side_effect=_fake_cloud_localds()):
+            driver._build_cloud_init_seed("vm", "u-2", "ubuntu", "$6$s$h")
+
+        sidecar = tmp_path / "u-2.seed.json"
+        assert json.loads(sidecar.read_text())["nics"] == []
+        assert (sidecar.stat().st_mode & 0o777) == 0o600
+
+    def test_no_sidecar_when_cloud_localds_fails(self, driver, tmp_path, monkeypatch):
+        monkeypatch.setattr("agent.libvirt_driver._SEED_BASE_DIR", str(tmp_path))
+        with patch("subprocess.run", side_effect=_fake_cloud_localds(returncode=1)):
+            assert driver._build_cloud_init_seed("vm", "u-3", "ubuntu", "$6$s$h") is None
+        assert not (tmp_path / "u-3.seed.json").exists()
+
+
+# ---------------------------------------------------------------------------
+# apply_vm_config: static IP on NIC addition
+# ---------------------------------------------------------------------------
+
+_VM_UUID = "abc-123"
+_RUNNING = 1
+_SHUTOFF = 5
+_STATIC_NIC = {"vlan_id": 101, "ip_cidr": "10.0.30.6/24", "gateway": "10.0.30.1"}
+
+
+def _seed_xml(seed_path: str | None) -> str:
+    """Sample domain XML whose cdrom points at *seed_path* (or with no cdrom at all)."""
+    if seed_path is None:
+        start = _SAMPLE_DOMAIN_XML.index("    <disk type='file' device='cdrom'>")
+        end = _SAMPLE_DOMAIN_XML.index("</disk>", start) + len("</disk>\n")
+        return _SAMPLE_DOMAIN_XML[:start] + _SAMPLE_DOMAIN_XML[end:]
+    return _SAMPLE_DOMAIN_XML.replace("/var/lib/cos/seeds/abc-123.iso", seed_path)
+
+
+class TestApplyVmConfigStaticIp:
+    def _run(self, tmp_path, monkeypatch, *, state, add_nics=None, xml=None,
+             sidecar: dict | None = None, existing_iso: bool = False, rc: int = 0):
+        seeds = tmp_path / "seeds"
+        seeds.mkdir()
+        monkeypatch.setattr("agent.libvirt_driver._SEED_BASE_DIR", str(seeds))
+        seed_path = str(seeds / f"{_VM_UUID}.iso")
+        if sidecar is not None:
+            (seeds / f"{_VM_UUID}.seed.json").write_text(json.dumps(sidecar))
+        if existing_iso:
+            (seeds / f"{_VM_UUID}.iso").write_text("old-iso")
+
+        domain = MagicMock()
+        domain.state.return_value = (state, 0)
+        domain.name.return_value = "test-vm"
+        domain.XMLDesc.return_value = xml if xml is not None else _seed_xml(seed_path)
+        conn = MagicMock()
+        conn.lookupByUUIDString.return_value = domain
+        driver = LibvirtDriver(uri="qemu:///system", bridge="nos-br")
+        driver.get_vm_config = MagicMock(
+            return_value={"vcpu": 2, "memory_mb": 2048, "disks": [], "nics": []}
+        )
+
+        calls: list[dict] = []
+        with patch("libvirt.open", return_value=conn), \
+             patch("subprocess.run", side_effect=_fake_cloud_localds(calls, returncode=rc)):
+            result = driver.apply_vm_config(
+                _VM_UUID, {"add_nics": add_nics if add_nics is not None else [_STATIC_NIC]}
+            )
+        return domain, result, calls, seeds
+
+    def test_running_vm_skips_seed_rebuild_and_reports_failure(self, tmp_path, monkeypatch):
+        domain, result, calls, seeds = self._run(tmp_path, monkeypatch, state=_RUNNING)
+
+        assert calls == []
+        domain.attachDeviceFlags.assert_called_once()  # NIC still attached, no seed attach
+        assert not (seeds / f"{_VM_UUID}.iso").exists()
+        assert len(result["nic_failures"]) == 1
+        failure = result["nic_failures"][0]
+        assert failure["target"] == "new-nic (vlan 101)"
+        assert "static IP requires the VM to be stopped" in failure["reason"]
+        assert "NIC attached without static IP configuration" in failure["reason"]
+
+    def test_running_vm_without_static_ip_has_no_failure(self, tmp_path, monkeypatch):
+        _, result, calls, _ = self._run(
+            tmp_path, monkeypatch, state=_RUNNING, add_nics=[{"vlan_id": 101}]
+        )
+        assert calls == []
+        assert result["nic_failures"] == []
+
+    def test_stopped_vm_with_only_ip_or_only_gateway_is_left_alone(self, tmp_path, monkeypatch):
+        _, result, calls, _ = self._run(
+            tmp_path, monkeypatch, state=_SHUTOFF,
+            add_nics=[{"vlan_id": 101, "ip_cidr": "10.0.30.6/24"}],
+        )
+        assert calls == []
+        assert result["nic_failures"] == []
+
+    def test_new_nic_attach_xml_carries_the_mac_used_in_network_config(self, tmp_path, monkeypatch):
+        domain, _, calls, _ = self._run(
+            tmp_path, monkeypatch, state=_SHUTOFF, sidecar={"user_data": "#cloud-config\n", "nics": []},
+            existing_iso=True,
+        )
+        attach_xml = domain.attachDeviceFlags.call_args_list[0][0][0]
+        new_mac = ET.fromstring(attach_xml).find("mac").get("address")
+        assert f"macaddress: '{new_mac}'" in calls[0]["network_config"]
+
+    def test_stopped_vm_rebuilds_seed_merging_existing_configuration(self, tmp_path, monkeypatch):
+        import libvirt as _lv
+        recorded = {
+            "user_data": "#cloud-config\nchpasswd: kept\n",
+            "nics": [{"mac": "52:54:00:11:22:33", "ip_cidr": "10.0.20.5/24", "gateway": "10.0.20.1"}],
+        }
+        domain, result, calls, seeds = self._run(
+            tmp_path, monkeypatch, state=_SHUTOFF, sidecar=recorded, existing_iso=True
+        )
+
+        assert result["nic_failures"] == []
+        assert len(calls) == 1
+        # Original user-data preserved; not regenerated.
+        assert calls[0]["user_data"] == recorded["user_data"]
+        cfg = calls[0]["network_config"]
+        # Existing primary NIC keeps its static IP, new NIC gets its own.
+        assert "macaddress: '52:54:00:11:22:33'" in cfg
+        assert "- 10.0.20.5/24" in cfg
+        assert "- 10.0.30.6/24" in cfg and "via: 10.0.30.1" in cfg
+        # Rebuilt ISO replaced the original in place, temp file gone.
+        assert (seeds / f"{_VM_UUID}.iso").read_text() == "iso"
+        assert not (seeds / f"{_VM_UUID}.iso.tmp").exists()
+        # Sidecar now records both static NICs.
+        state = json.loads((seeds / f"{_VM_UUID}.seed.json").read_text())
+        assert {n["ip_cidr"] for n in state["nics"]} == {"10.0.20.5/24", "10.0.30.6/24"}
+        # NIC attached persistently only (domain is off); seed already attached.
+        domain.attachDeviceFlags.assert_called_once()
+        assert domain.attachDeviceFlags.call_args[0][1] == _lv.VIR_DOMAIN_AFFECT_CONFIG
+
+    def test_existing_dhcp_nic_stays_dhcp_in_rebuilt_network_config(self, tmp_path, monkeypatch):
+        """A network-config replaces cloud-init's DHCP fallback, so unlisted NICs would go dark."""
+        _, _, calls, _ = self._run(
+            tmp_path, monkeypatch, state=_SHUTOFF,
+            sidecar={"user_data": "#cloud-config\n", "nics": []}, existing_iso=True,
+        )
+        cfg = calls[0]["network_config"]
+        primary_block = cfg.split("eth1:")[0]
+        assert "macaddress: '52:54:00:11:22:33'" in primary_block
+        assert "dhcp4: true" in primary_block
+
+    def test_creates_and_attaches_new_seed_when_vm_has_none(self, tmp_path, monkeypatch):
+        import libvirt as _lv
+        domain, result, calls, seeds = self._run(
+            tmp_path, monkeypatch, state=_SHUTOFF, xml=_seed_xml(None)
+        )
+
+        assert result["nic_failures"] == []
+        assert calls[0]["user_data"] == "#cloud-config\n"
+        assert (seeds / f"{_VM_UUID}.iso").exists()
+        # NIC attach + seed cdrom attach, both config-only.
+        assert domain.attachDeviceFlags.call_count == 2
+        seed_xml, flags = domain.attachDeviceFlags.call_args_list[1][0]
+        assert "device='cdrom'" in seed_xml and str(seeds / f"{_VM_UUID}.iso") in seed_xml
+        assert flags == _lv.VIR_DOMAIN_AFFECT_CONFIG
+
+    def test_legacy_seed_without_recorded_state_is_left_untouched(self, tmp_path, monkeypatch):
+        domain, result, calls, seeds = self._run(
+            tmp_path, monkeypatch, state=_SHUTOFF, existing_iso=True
+        )
+
+        assert calls == []
+        assert (seeds / f"{_VM_UUID}.iso").read_text() == "old-iso"
+        assert len(result["nic_failures"]) == 1
+        assert "NIC attached but static IP not configured" in result["nic_failures"][0]["reason"]
+        assert "no recorded state" in result["nic_failures"][0]["reason"]
+
+    def test_cloud_localds_failure_keeps_old_seed_and_reports_failure(self, tmp_path, monkeypatch):
+        _, result, _, seeds = self._run(
+            tmp_path, monkeypatch, state=_SHUTOFF, rc=1,
+            sidecar={"user_data": "#cloud-config\n", "nics": []}, existing_iso=True,
+        )
+        assert (seeds / f"{_VM_UUID}.iso").read_text() == "old-iso"
+        assert not (seeds / f"{_VM_UUID}.iso.tmp").exists()
+        assert len(result["nic_failures"]) == 1
+        assert "cloud-localds failed" in result["nic_failures"][0]["reason"]
+
+    def test_failed_nic_attach_skips_static_ip_handling(self, tmp_path, monkeypatch):
+        import libvirt as _lv
+        seeds = tmp_path / "seeds"
+        seeds.mkdir()
+        monkeypatch.setattr("agent.libvirt_driver._SEED_BASE_DIR", str(seeds))
+        domain = MagicMock()
+        domain.state.return_value = (_SHUTOFF, 0)
+        domain.attachDeviceFlags.side_effect = _lv.libvirtError("attach boom")
+        conn = MagicMock()
+        conn.lookupByUUIDString.return_value = domain
+        driver = LibvirtDriver(uri="qemu:///system", bridge="nos-br")
+        driver.get_vm_config = MagicMock(return_value={"vcpu": 2, "memory_mb": 2048, "disks": [], "nics": []})
+
+        with patch("libvirt.open", return_value=conn), patch("subprocess.run") as run:
+            result = driver.apply_vm_config(_VM_UUID, {"add_nics": [_STATIC_NIC]})
+
+        run.assert_not_called()
+        assert len(result["nic_failures"]) == 1
+        assert "attach boom" in result["nic_failures"][0]["reason"]

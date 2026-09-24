@@ -127,6 +127,7 @@ export interface NICInfo {
   mac: string
   bridge: string
   vlan_id: number | null
+  ip_addresses: string[]
   network_id: string | null
   network_name: string | null
 }
@@ -148,6 +149,6 @@ export interface VMHardwareChanges {
   vcpu?: number | null
   memory_mb?: number | null
   add_disks: { size_gb: number }[]
-  add_nics: { network_id: string }[]
+  add_nics: { network_id: string; ip_cidr?: string; gateway?: string }[]
   remove_nics: { target: string }[]
 }

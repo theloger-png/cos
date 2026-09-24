@@ -14,7 +14,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog'
-import { useVMHardware, useApplyVMHardware } from '@/hooks/useVMs'
+import { useVMHardware, useApplyVMHardware, useVMs } from '@/hooks/useVMs'
 import { useNetworks } from '@/hooks/useNetworks'
 import type { NICFailure, VMHardwareChanges } from '@/types'
 
@@ -24,6 +24,7 @@ export function VMHardware() {
 
   const { data: hardware, isLoading, error } = useVMHardware(id ?? '')
   const { data: allNetworks = [] } = useNetworks()
+  const { data: vms = [] } = useVMs()
   const applyHardware = useApplyVMHardware(id ?? '')
 
   // Editable CPU / RAM (mirror current hardware, user edits in place)
@@ -32,12 +33,16 @@ export function VMHardware() {
 
   // Pending additions / removals
   const [disksToAdd, setDisksToAdd] = useState<{ size_gb: number }[]>([])
-  const [nicsToAdd, setNicsToAdd] = useState<{ network_id: string; network_name: string }[]>([])
+  const [nicsToAdd, setNicsToAdd] = useState<
+    { network_id: string; network_name: string; ip_cidr: string; gateway: string }[]
+  >([])
   const [nicsToRemove, setNicsToRemove] = useState<{ target: string }[]>([])
 
   // Inline forms
   const [newDiskSizeGb, setNewDiskSizeGb] = useState('')
   const [newNicNetworkId, setNewNicNetworkId] = useState('none')
+  const [newNicIpCidr, setNewNicIpCidr] = useState('')
+  const [newNicGateway, setNewNicGateway] = useState('')
 
   // Confirmation dialog
   const [confirmOpen, setConfirmOpen] = useState(false)
@@ -65,7 +70,11 @@ export function VMHardware() {
   if (vcpuChanged) pendingSummaryParts.push(`CPU: ${hardware.vcpu} → ${vcpu}`)
   if (memoryChanged) pendingSummaryParts.push(`RAM: ${hardware.memory_mb} MB → ${memoryMb} MB`)
   disksToAdd.forEach((d) => pendingSummaryParts.push(`+disk ${d.size_gb} GB`))
-  nicsToAdd.forEach((n) => pendingSummaryParts.push(`+NIC (${n.network_name})`))
+  nicsToAdd.forEach((n) =>
+    pendingSummaryParts.push(
+      `+NIC (${n.network_name}${n.ip_cidr ? `, static IP ${n.ip_cidr}` : ''})`,
+    ),
+  )
   nicsToRemove.forEach((n) => pendingSummaryParts.push(`-NIC ${n.target}`))
 
   const handleAddDisk = () => {
@@ -79,8 +88,21 @@ export function VMHardware() {
     if (newNicNetworkId === 'none') return
     const net = allNetworks.find((n) => n.id === newNicNetworkId)
     if (!net) return
-    setNicsToAdd((prev) => [...prev, { network_id: net.id, network_name: net.name }])
+    const ipCidr = newNicIpCidr.trim()
+    const gateway = newNicGateway.trim()
+    const hasStaticIp = ipCidr !== '' && gateway !== ''
+    setNicsToAdd((prev) => [
+      ...prev,
+      {
+        network_id: net.id,
+        network_name: net.name,
+        ip_cidr: hasStaticIp ? ipCidr : '',
+        gateway: hasStaticIp ? gateway : '',
+      },
+    ])
     setNewNicNetworkId('none')
+    setNewNicIpCidr('')
+    setNewNicGateway('')
   }
 
   const handleRemoveNic = (target: string) => {
@@ -93,7 +115,10 @@ export function VMHardware() {
     setApplyError(null)
     const changes: VMHardwareChanges = {
       add_disks: disksToAdd,
-      add_nics: nicsToAdd.map((n) => ({ network_id: n.network_id })),
+      add_nics: nicsToAdd.map((n) => ({
+        network_id: n.network_id,
+        ...(n.ip_cidr && n.gateway ? { ip_cidr: n.ip_cidr, gateway: n.gateway } : {}),
+      })),
       remove_nics: nicsToRemove,
     }
     if (vcpuChanged) changes.vcpu = vcpu
@@ -116,6 +141,7 @@ export function VMHardware() {
     })
   }
 
+  const vmIsRunning = vms.find((v) => v.id === id)?.status === 'running'
   const primaryNicTarget = hardware.nics[0]?.target ?? ''
   const removingTargets = new Set(nicsToRemove.map((n) => n.target))
 
@@ -282,7 +308,12 @@ export function VMHardware() {
                           ? `VLAN ${nic.vlan_id} (unknown network)`
                           : <span className="text-[var(--muted-foreground)]">—</span>}
                     </TableCell>
-                    <TableCell className="font-mono text-xs text-[var(--muted-foreground)]">{nic.mac}</TableCell>
+                    <TableCell className="font-mono text-xs text-[var(--muted-foreground)]">
+                      {nic.mac}
+                      {nic.ip_addresses.length > 0 && (
+                        <div className="mt-0.5">{nic.ip_addresses.join(', ')}</div>
+                      )}
+                    </TableCell>
                     <TableCell>
                       {!pendingRemoval && (
                         <Button
@@ -307,7 +338,10 @@ export function VMHardware() {
               <p className="text-xs text-[var(--muted-foreground)] mb-2">Pending NIC changes</p>
               {nicsToAdd.map((n, i) => (
                 <div key={i} className="flex items-center justify-between text-sm">
-                  <span className="text-green-400">+ NIC on {n.network_name}</span>
+                  <span className="text-green-400">
+                    + NIC on {n.network_name}
+                    {n.ip_cidr && ` - static IP ${n.ip_cidr} via ${n.gateway}`}
+                  </span>
                   <button
                     className="text-[var(--muted-foreground)] hover:text-red-400 text-xs"
                     onClick={() => setNicsToAdd((prev) => prev.filter((_, j) => j !== i))}
@@ -350,6 +384,37 @@ export function VMHardware() {
             <Button size="sm" variant="outline" onClick={handleAddNic} disabled={newNicNetworkId === 'none'}>
               <Plus className="h-3.5 w-3.5 mr-1" /> Add NIC
             </Button>
+          </div>
+
+          <div className="space-y-2">
+            <div className="grid grid-cols-2 gap-4">
+              <div className="space-y-1">
+                <Label htmlFor="nic-ip-cidr" className="text-xs">Static IP (CIDR)</Label>
+                <Input
+                  id="nic-ip-cidr"
+                  value={newNicIpCidr}
+                  onChange={(e) => setNewNicIpCidr(e.target.value)}
+                  placeholder="10.0.20.5/24"
+                />
+              </div>
+              <div className="space-y-1">
+                <Label htmlFor="nic-gateway" className="text-xs">Gateway</Label>
+                <Input
+                  id="nic-gateway"
+                  value={newNicGateway}
+                  onChange={(e) => setNewNicGateway(e.target.value)}
+                  placeholder="10.0.20.1"
+                />
+              </div>
+            </div>
+            <p className="text-xs text-[var(--muted-foreground)]">
+              Optional. Both fields are required to set a static IP; the guest uses DHCP if left blank.
+            </p>
+            {vmIsRunning && (
+              <p className="text-xs text-yellow-300">
+                Static IP requires the VM to be stopped - will be ignored on a running VM.
+              </p>
+            )}
           </div>
         </CardContent>
       </Card>
