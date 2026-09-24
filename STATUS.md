@@ -26,17 +26,19 @@
 - GET/POST/DELETE /api/v1/networks
 - GET/POST/DELETE /api/v1/tenants + API key generation
 - GET/POST/DELETE /api/v1/templates
-- POST /api/v1/config/commit, POST /api/v1/config/rollback/{n}, GET /api/v1/config/compare (NOS passthrough)
+- GET/PUT /api/v1/vms/{id}/hardware (CPU/RAM/disk/NIC editing)
+- (Removed 2026-09-24: /api/v1/config/* NOS passthrough endpoints)
 
 ### Scheduler
 - Best-fit by free RAM ratio
 - Filters online nodes that can fit cpu_cores + ram_mb + disk_gb
 - Returns None if no node available
 
-### NOS Client
-- httpx async client for NOS REST API
-- configure_vlan, delete_vlan, configure_interface, commit
-- Graceful error handling (logs, returns False on failure)
+### Networking (OVS)
+- NOS integration fully removed (2026-09-24); controller/nos_client/, agent/nos_driver.py and agent/nos_api_client.py deleted
+- VM NICs use native OVS VLAN tagging via libvirt domain XML (<virtualport type='openvswitch'/> + <vlan><tag id='X'/></vlan>), applied by libvirt + OVS at NIC attach/detach
+- No external NOS API calls, hooks, or CLI commands are needed for VLAN provisioning
+- A Network (name + vlan_id + optional cidr/gateway) is a DB record used to pick the VLAN tag at NIC creation
 
 ### Agent
 - Registers with controller on startup (upsert by ip_address)
@@ -44,9 +46,9 @@
 - Heartbeat every 30s: cpu_used, ram_used_mb, disk_used_gb, vm_statuses
 - X-API-Key authentication to controller
 - WebSocket server on :8091
-- Commands: vm_create, vm_start, vm_stop, vm_reboot, vm_destroy, vm_migrate, vm_list, node_stats
+- Commands: vm_create, vm_start, vm_stop, vm_reboot, vm_destroy, vm_migrate, vm_list, node_stats (configure_vlan/remove_vlan removed 2026-09-24)
 - libvirt_driver: KVM VM lifecycle via libvirt Python bindings
-- nos_driver: local NOS REST API wrapper for VLAN config
+- NIC VLAN tagging handled in libvirt_driver via OVS domain XML (nos_driver removed)
 
 ### Portal
 - React 19 + TypeScript + Vite + Tailwind CSS
@@ -69,19 +71,21 @@
 ### Deployment
 - scripts/cos-install.sh --role controller|agent
 - Controller: installs PostgreSQL, Node.js 20, nginx, builds portal, runs migrations
-- Agent: installs KVM, libvirt, configures cos user
+- Agent: installs KVM, libvirt, openvswitch-switch, configures cos user (no longer added to nos group)
 - Adds invoking user to cos group automatically
 - Systemd services: cos-controller.service, cos-agent.service
 
 ### Database Schema (via Alembic)
 - Tables: nodes, vms, tenants, networks, vm_templates, api_keys, users, alembic_version
+- nos_api_key column removed from nodes (migration f6a7b8c0d1e2)
 - All migrations tracked in alembic/versions/
 
 ## Known Limitations / TODO
 
 ### Phase 1 Remaining
-- Deploy on physical nodes (currently ESXi on bare metal)
-- End-to-end VM creation test with real KVM + disk image
+- feature/ovs-networking branch not yet merged to main
+- Multi-NIC support for static IP configuration (currently single-NIC only)
+- No automated script yet for the full nos-br + OVS internal port + netplan bootstrap from scratch (done manually on cos-node1; see scripts/migrate-mgmt-to-ovs.sh for the migration pattern) - would be a useful addition to scripts/
 - Controller HA (PostgreSQL replication, Keepalived VIP)
 - HTTPS/SSL for portal and API
 
@@ -114,10 +118,39 @@
 - React + Vite SPA served by nginx
 - Alembic for all DB schema changes
 - libvirt-python for KVM management
-- NOS REST API for networking (same stack as NOS)
+- Open vSwitch for VM networking: native VLAN tagging via libvirt domain XML (replaced NOS REST API, 2026-09-24)
 
 ## Test Count
 - Total: TBD - run pytest from project root
+
+## Recent Changes (2026-09-24)
+All on branch feature/ovs-networking (not yet merged to main).
+- **NOS networking dependency fully removed**:
+  - agent/libvirt_driver.py refactored: VM NICs use native OVS VLAN tagging via libvirt domain XML (<virtualport type='openvswitch'/> and <vlan><tag id='X'/></vlan>), applied automatically by libvirt + OVS at NIC attach/detach
+  - Deleted agent/nos_driver.py, controller/nos_client/, and agent/nos_api_client.py (the last was orphaned dead code found and removed at the end of the session)
+  - Removed nos_api_key from the Node DB model (Alembic migration f6a7b8c0d1e2); removed NOS config fields from agent/config.py and controller/config.py
+  - Removed configure_vlan/remove_vlan WebSocket commands and the controller-side broadcast logic in controller/api/routers/networks.py
+  - scripts/cos-install.sh no longer adds the cos user to the nos group; installs openvswitch-switch as an agent-role dependency
+  - Earlier entries below that describe NOS provisioning are historical and superseded by this change
+- **New scripts**:
+  - scripts/create-test-vm.sh: creates a KVM VM with OVS VLAN tagging for manual testing; auto-downloads the Ubuntu Noble cloud image if missing
+  - scripts/migrate-mgmt-to-ovs.sh: one-time migration of a node's management IP from a VLAN sub-interface on a physical NIC to an OVS internal port on the nos-br bridge
+- **New feature: optional static IP at VM creation** (single NIC only for now):
+  - Operators can provide an IP/CIDR and gateway when creating a VM
+  - agent/libvirt_driver.py generates a MAC address explicitly for each VM NIC and, when a static IP is given, writes a cloud-init network-config v2 file (matched by MAC) into the seed ISO via cloud-localds --network-config; with no IP the guest uses DHCP (unchanged default)
+  - Portal (VMCreate.tsx): optional "Static IP (CIDR)" and "Gateway" fields, shown when a Network is selected
+  - Validated end-to-end on cos-node1/cos-controller: static IP applied inside the guest via cloud-init
+- **Infrastructure migration validated on cos-node1** (fresh Ubuntu 24.04 install):
+  - NOS uninstalled/unused; OVS installed via cos-install.sh
+  - Topology: single OVS bridge "nos-br" carries both physical trunk uplinks (1G management-facing NIC and 10G data-facing NIC) plus an OVS internal port ("mgmtNNN", tagged with the management VLAN) for the node's own management IP, so VMs on the management VLAN reach the node locally over the bridge without traversing the physical switch
+  - Management IP configured via netplan on the OVS internal port (not the physical NIC)
+  - cos-controller VM recreated from scratch with scripts/create-test-vm.sh; controller role installed and validated (login, API key auth working)
+  - cos-agent reinstalled on cos-node1 and re-registered with the new controller; heartbeat confirmed online
+- **Fixed** (pre-existing bugs surfaced by the first real UI walkthrough in a while):
+  - Tenants create form was missing the required "email" field (form and type updated)
+  - Templates create form was missing required "os_type" and "image_path" fields (form and type updated)
+  - VM Credentials modal copy buttons did nothing over plain HTTP (Clipboard API fails silently in non-secure contexts); fixed with a secure-context check, an execCommand('copy') fallback, error logging, and visual copy-success feedback
+- **Operational note** (documented in CLAUDE.md): controller and agent run from an installed package in /opt/cos/venv, so git pull alone does not update running code; every deploy needs pip install --force-reinstall --no-cache-dir --no-deps into the venv followed by a service restart, for both controller and agent
 
 ## Recent Changes (2026-06-15)
 - **Validated milestone** (late afternoon): Cloud-init credentials and VM hardware editing features (13 commits, 216 tests)
