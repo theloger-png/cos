@@ -107,6 +107,9 @@ _DOMAIN_XML_TEMPLATE = """\
     <console type='pty'>
       <target type='serial' port='0'/>
     </console>
+    <channel type='unix'>
+      <target type='virtio' name='org.qemu.guest_agent.0'/>
+    </channel>
     <graphics type='vnc' port='-1' autoport='yes'/>
   </devices>
 </domain>
@@ -130,6 +133,10 @@ def _make_cloud_init_user_data(cloud_init_user: str, cloud_init_password_hash: s
         "      type: hash\n"
         "  expire: false\n"
         "ssh_pwauth: true\n"
+        "packages:\n"
+        "  - qemu-guest-agent\n"
+        "runcmd:\n"
+        "  - systemctl enable --now qemu-guest-agent\n"
     )
 
 
@@ -269,16 +276,18 @@ def _run_cloud_localds(
     return True
 
 
-def _collect_interface_ipv4(domain: libvirt.virDomain, source: int) -> dict[str, list[str]]:
-    """Return {lower-case MAC: [IPv4 addresses]} from one interfaceAddresses() source.
+def _lookup_nic_ips(domain: libvirt.virDomain) -> dict[str, list[str]]:
+    """Return {lower-case MAC: [IPv4 addresses]} as reported by the qemu-guest-agent.
 
-    Returns an empty dict when the source is unavailable (domain not running,
-    guest agent not responding, ...). Loopback and link-local addresses are skipped.
+    Any libvirt error (domain not running, guest agent not installed, channel
+    missing, agent not yet responding after boot) means "no data available",
+    not a failure, so it yields an empty dict. Loopback and link-local
+    addresses are skipped.
     """
     try:
-        ifaces = domain.interfaceAddresses(source)
+        ifaces = domain.interfaceAddresses(libvirt.VIR_DOMAIN_INTERFACE_ADDRESSES_SRC_AGENT)
     except libvirt.libvirtError as exc:
-        logger.debug("interfaceAddresses(source=%s) unavailable: %s", source, exc)
+        logger.debug("Guest agent interface addresses unavailable: %s", exc)
         return {}
 
     result: dict[str, list[str]] = {}
@@ -300,21 +309,6 @@ def _collect_interface_ipv4(domain: libvirt.virDomain, source: int) -> dict[str,
             if ip not in ips:
                 ips.append(ip)
     return result
-
-
-def _lookup_nic_ips(domain: libvirt.virDomain, macs: list[str]) -> dict[str, list[str]]:
-    """Return {lower-case MAC: [IPv4]} for *macs*, preferring the guest agent over ARP.
-
-    The ARP source (host neighbour table) is only queried when the guest agent
-    is unavailable or knows no address for at least one of the NICs.
-    """
-    ips = _collect_interface_ipv4(domain, libvirt.VIR_DOMAIN_INTERFACE_ADDRESSES_SRC_AGENT)
-    if any(not ips.get(m) for m in macs):
-        arp_ips = _collect_interface_ipv4(domain, libvirt.VIR_DOMAIN_INTERFACE_ADDRESSES_SRC_ARP)
-        for m in macs:
-            if not ips.get(m) and arp_ips.get(m):
-                ips[m] = arp_ips[m]
-    return ips
 
 
 class LibvirtDriver:
@@ -635,20 +629,16 @@ class LibvirtDriver:
         element in the domain XML, applied natively by libvirt+OVS.
 
         ip_addresses holds the NIC's live IPv4 addresses, matched by MAC: the
-        qemu-guest-agent is asked first, falling back to the host ARP table.
-        It is empty for stopped domains.
+        qemu-guest-agent is the only source. It is empty when the domain is
+        stopped, the guest agent is missing or not yet running, or the domain
+        lacks the virtio-serial guest agent channel (VMs created before it was added).
         """
         conn = self._connect()
         try:
             domain = conn.lookupByUUIDString(libvirt_uuid)
             xml_str = domain.XMLDesc(0)
             root = ET.fromstring(xml_str)
-            nic_macs = [
-                m.get("address", "").lower()
-                for m in root.findall(".//interface[@type='bridge']/mac")
-                if m.get("address")
-            ]
-            ip_map = _lookup_nic_ips(domain, nic_macs)
+            ip_map = _lookup_nic_ips(domain)
         finally:
             conn.close()
 

@@ -141,7 +141,8 @@ All on branch feature/ovs-networking (not yet merged to main).
   - Portal (VMCreate.tsx): optional "Static IP (CIDR)" and "Gateway" fields, shown when a Network is selected
   - Validated end-to-end on cos-node1/cos-controller: static IP applied inside the guest via cloud-init
 - **New feature: live IP addresses in the hardware editor**:
-  - agent get_vm_config() adds ip_addresses (IPv4 only) to each NIC via domain.interfaceAddresses(): qemu-guest-agent first, host ARP table as per-NIC fallback, matched by MAC; empty list for stopped VMs
+  - agent get_vm_config() adds ip_addresses (IPv4 only) to each NIC via domain.interfaceAddresses(): qemu-guest-agent only (ARP removed: VMs are commonly on routed subnets, so host ARP cannot see them), matched by MAC; empty list when the VM is stopped or the agent is unavailable
+  - New VMs get a virtio-serial org.qemu.guest_agent.0 channel in the domain XML and cloud-init installs/enables qemu-guest-agent; VMs created before this change have neither and keep showing no IPs (not retrofitted)
   - Portal VMHardware.tsx shows them under each NIC's MAC
 - **New feature: optional static IP when adding a NIC** (VM must be stopped):
   - AddNICRequest gains ip_cidr/gateway (both required, otherwise ignored); agent generates the new NIC's MAC explicitly and, if the domain is shut off, rebuilds its cloud-init seed ISO with a multi-NIC network-config

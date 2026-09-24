@@ -101,6 +101,27 @@ class TestCreateVM:
         assert "type='network'" not in xml
         assert "network='default'" not in xml
 
+    def test_xml_has_guest_agent_channel(self, driver):
+        domain = _mock_domain()
+        conn = _mock_conn()
+        captured_xml: list[str] = []
+        conn.defineXML.side_effect = lambda xml: (captured_xml.append(xml), domain)[1]
+
+        with patch("libvirt.open", return_value=conn), \
+             patch("os.makedirs"), \
+             patch("os.path.exists", return_value=False), \
+             patch("os.system"):
+            driver.create_vm("vm-01", 2, 2048, 20, "")
+
+        import xml.etree.ElementTree as _ET
+        root = _ET.fromstring(captured_xml[0])
+        channels = root.findall("./devices/channel[@type='unix']")
+        assert len(channels) == 1
+        target = channels[0].find("target")
+        assert target.get("type") == "virtio"
+        assert target.get("name") == "org.qemu.guest_agent.0"
+        assert channels[0].find("source") is None
+
     def test_xml_uses_custom_bridge(self):
         custom_driver = LibvirtDriver(uri="qemu:///system", bridge="custom-br0")
         domain = _mock_domain()
@@ -375,6 +396,20 @@ class TestMakeCloudInitUserData:
     def test_ssh_pwauth_enabled(self):
         ud = _make_cloud_init_user_data("ubuntu", "$6$s$h")
         assert "ssh_pwauth: true" in ud
+
+    def test_installs_guest_agent_package(self):
+        ud = _make_cloud_init_user_data("ubuntu", "$6$s$h")
+        assert "packages:\n  - qemu-guest-agent\n" in ud
+
+    def test_enables_guest_agent_service(self):
+        ud = _make_cloud_init_user_data("ubuntu", "$6$s$h")
+        assert "runcmd:\n  - systemctl enable --now qemu-guest-agent\n" in ud
+
+    def test_user_data_is_valid_yaml(self):
+        import yaml
+        doc = yaml.safe_load(_make_cloud_init_user_data("ubuntu", "$6$s$h"))
+        assert doc["packages"] == ["qemu-guest-agent"]
+        assert doc["runcmd"] == ["systemctl enable --now qemu-guest-agent"]
 
     def test_custom_user_reflected(self):
         ud = _make_cloud_init_user_data("myuser", "$6$s$h")
@@ -953,7 +988,6 @@ class TestApplyVmConfigDiskAdd:
 import libvirt as _libvirt  # noqa: E402
 
 _SRC_AGENT = _libvirt.VIR_DOMAIN_INTERFACE_ADDRESSES_SRC_AGENT
-_SRC_ARP = _libvirt.VIR_DOMAIN_INTERFACE_ADDRESSES_SRC_ARP
 _IPV4 = _libvirt.VIR_IP_ADDR_TYPE_IPV4
 _IPV6 = _libvirt.VIR_IP_ADDR_TYPE_IPV6
 
@@ -997,7 +1031,7 @@ class TestGetVmConfigIpAddresses:
             result = driver.get_vm_config("abc-123")
         return domain, result
 
-    def test_guest_agent_ips_used_and_arp_not_queried(self):
+    def test_guest_agent_ips_used(self):
         domain, result = self._run({
             _SRC_AGENT: {"ens3": _iface("52:54:00:11:22:33", (_IPV4, "10.0.20.5"))},
         })
@@ -1005,25 +1039,24 @@ class TestGetVmConfigIpAddresses:
         sources = [c[0][0] for c in domain.interfaceAddresses.call_args_list]
         assert sources == [_SRC_AGENT]
 
-    def test_falls_back_to_arp_when_agent_raises(self):
+    def test_agent_exception_yields_empty_list_without_arp_fallback(self):
         domain, result = self._run({
-            _SRC_AGENT: _libvirt.libvirtError("Guest agent is not responding"),
-            _SRC_ARP: {"vnet0": _iface("52:54:00:11:22:33", (_IPV4, "10.0.20.7"))},
+            _SRC_AGENT: _libvirt.libvirtError("QEMU guest agent is not configured"),
         })
-        assert result["nics"][0]["ip_addresses"] == ["10.0.20.7"]
+        assert result["nics"][0]["ip_addresses"] == []
+        assert result["vcpu"] == 2
         sources = [c[0][0] for c in domain.interfaceAddresses.call_args_list]
-        assert sources == [_SRC_AGENT, _SRC_ARP]
+        assert sources == [_SRC_AGENT]
 
-    def test_falls_back_to_arp_when_agent_has_no_addresses_for_mac(self):
+    def test_agent_without_address_for_mac_yields_empty_list(self):
         _, result = self._run({
             _SRC_AGENT: {"ens9": _iface("52:54:00:99:99:99", (_IPV4, "10.9.9.9"))},
-            _SRC_ARP: {"vnet0": _iface("52:54:00:11:22:33", (_IPV4, "10.0.20.8"))},
         })
-        assert result["nics"][0]["ip_addresses"] == ["10.0.20.8"]
+        assert result["nics"][0]["ip_addresses"] == []
 
     def test_stopped_domain_returns_empty_ip_list(self):
         not_running = _libvirt.libvirtError("Requested operation is not valid: domain is not running")
-        _, result = self._run({_SRC_AGENT: not_running, _SRC_ARP: not_running})
+        _, result = self._run({_SRC_AGENT: not_running})
         assert result["nics"][0]["ip_addresses"] == []
         assert result["vcpu"] == 2
 
@@ -1048,17 +1081,14 @@ class TestGetVmConfigIpAddresses:
         })
         assert result["nics"][0]["ip_addresses"] == []
 
-    def test_multi_nic_matched_by_mac_with_per_nic_fallback(self):
-        """NIC 1 resolved by the agent, NIC 2 only known to the ARP table."""
+    def test_multi_nic_matched_by_mac(self):
+        """NIC 1 resolved by the agent, NIC 2 unknown to it gets an empty list."""
         _, result = self._run(
-            {
-                _SRC_AGENT: {"ens3": _iface("52:54:00:11:22:33", (_IPV4, "10.0.20.5"))},
-                _SRC_ARP: {"vnet1": _iface("52:54:00:AA:BB:CC", (_IPV4, "10.0.30.6"))},
-            },
+            {_SRC_AGENT: {"ens3": _iface("52:54:00:11:22:33", (_IPV4, "10.0.20.5"))}},
             xml=_TWO_NIC_DOMAIN_XML,
         )
         by_target = {n["target"]: n["ip_addresses"] for n in result["nics"]}
-        assert by_target == {"vnet0": ["10.0.20.5"], "vnet1": ["10.0.30.6"]}
+        assert by_target == {"vnet0": ["10.0.20.5"], "vnet1": []}
 
 
 # ---------------------------------------------------------------------------
