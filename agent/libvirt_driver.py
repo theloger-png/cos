@@ -2,15 +2,18 @@
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import ipaddress
 import json
 import logging
 import os
+import queue
 import random
 import shutil
 import subprocess
 import tempfile
+import threading
 import time
 import uuid
 import xml.etree.ElementTree as ET
@@ -318,6 +321,124 @@ def _lookup_nic_ips(domain: libvirt.virDomain) -> dict[str, list[str]]:
             if ip not in ips:
                 ips.append(ip)
     return result
+
+
+class ConsoleUnavailableError(Exception):
+    """Base class for failures opening a domain's pty console."""
+
+
+class DomainNotFoundError(ConsoleUnavailableError):
+    """No domain exists for the given libvirt UUID."""
+
+
+class DomainNotRunningError(ConsoleUnavailableError):
+    """The domain exists but is not currently running."""
+
+
+_CONSOLE_POLL_INTERVAL = 0.02  # seconds between "would block" (-2) retries
+_CONSOLE_RECV_BYTES = 4096
+
+
+class ConsoleSession:
+    """Bridges a domain's pty console libvirt Stream to asyncio.
+
+    All Stream I/O (recv/send) happens on one dedicated background thread:
+    a non-blocking virStream must be polled in a tight loop, and libvirt
+    objects are not meant to be driven concurrently from multiple threads,
+    so a single thread owns the stream/connection for its whole lifetime.
+
+    Bytes read from the console are handed to *inbound_queue* (an
+    asyncio.Queue) via call_soon_threadsafe, for the caller to forward to a
+    WebSocket; a None sentinel on that queue means the console has closed
+    (domain stopped, stream error, or close() was called). Bytes to write
+    to the console are queued from any thread via write().
+    """
+
+    def __init__(
+        self,
+        conn: libvirt.virConnect,
+        stream: libvirt.virStream,
+        loop: asyncio.AbstractEventLoop,
+    ) -> None:
+        self._conn = conn
+        self._stream = stream
+        self._loop = loop
+        self.inbound_queue: asyncio.Queue = asyncio.Queue()
+        self._outbound_queue: queue.Queue = queue.Queue()
+        self._stop_event = threading.Event()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+
+    def start(self) -> None:
+        """Start the background reader/writer thread."""
+        self._thread.start()
+
+    def write(self, data: bytes) -> None:
+        """Queue bytes (e.g. received from the browser) to write to the console.
+
+        Safe to call from any thread.
+        """
+        self._outbound_queue.put(data)
+
+    def close(self) -> None:
+        """Stop the background thread and let it clean up the libvirt stream/connection.
+
+        Safe to call more than once. Blocks briefly for the thread to exit;
+        call this from an executor thread, not the event loop, to avoid
+        stalling it.
+        """
+        self._stop_event.set()
+        if self._thread.is_alive():
+            self._thread.join(timeout=5)
+
+    def _run(self) -> None:
+        try:
+            while not self._stop_event.is_set():
+                self._flush_outbound()
+                try:
+                    data = self._stream.recv(_CONSOLE_RECV_BYTES)
+                except libvirt.libvirtError as exc:
+                    logger.debug("console stream recv error: %s", exc)
+                    break
+                if isinstance(data, int):
+                    if data == -2:
+                        time.sleep(_CONSOLE_POLL_INTERVAL)
+                        continue
+                    break  # genuine error code
+                if not data:
+                    break  # EOF: domain stopped or console closed
+                self._loop.call_soon_threadsafe(self.inbound_queue.put_nowait, data)
+        finally:
+            with contextlib.suppress(Exception):
+                self._loop.call_soon_threadsafe(self.inbound_queue.put_nowait, None)
+            with contextlib.suppress(Exception):
+                self._stream.finish()
+            with contextlib.suppress(Exception):
+                self._conn.close()
+
+    def _flush_outbound(self) -> None:
+        """Write any bytes queued by write() to the console, without blocking."""
+        while True:
+            try:
+                data = self._outbound_queue.get_nowait()
+            except queue.Empty:
+                return
+            self._send_all(data)
+
+    def _send_all(self, data: bytes) -> None:
+        """Write *data* to the stream, retrying on "would block" until sent or stopped."""
+        view = memoryview(data)
+        while view and not self._stop_event.is_set():
+            try:
+                sent = self._stream.send(bytes(view))
+            except libvirt.libvirtError as exc:
+                logger.debug("console stream send error: %s", exc)
+                return
+            if sent == -2:
+                time.sleep(_CONSOLE_POLL_INTERVAL)
+                continue
+            if not isinstance(sent, int) or sent <= 0:
+                return
+            view = view[sent:]
 
 
 class LibvirtDriver:
@@ -719,6 +840,43 @@ class LibvirtDriver:
             if target_elem is not None and target_elem.get("type") == "isa-serial":
                 return True
         return False
+
+    def open_console(self, libvirt_uuid: str, loop: asyncio.AbstractEventLoop) -> ConsoleSession:
+        """Open the pty console of a running domain as a live ConsoleSession.
+
+        Raises DomainNotFoundError if no domain matches *libvirt_uuid*,
+        DomainNotRunningError if it exists but is not currently running, or
+        ConsoleUnavailableError if openConsole fails for another reason (for
+        example a domain with no serial pty console configured).
+
+        Uses VIR_DOMAIN_CONSOLE_FORCE so this session takes over any console
+        session already attached to the domain, matching "virsh console
+        --force" behavior - a new viewer always wins.
+        """
+        conn = self._connect()
+        try:
+            domain = conn.lookupByUUIDString(libvirt_uuid)
+        except libvirt.libvirtError as exc:
+            conn.close()
+            raise DomainNotFoundError(str(exc)) from exc
+
+        state, _ = domain.state()
+        if state != libvirt.VIR_DOMAIN_RUNNING:
+            conn.close()
+            raise DomainNotRunningError(f"domain state={state}")
+
+        stream = conn.newStream(libvirt.VIR_STREAM_NONBLOCK)
+        try:
+            domain.openConsole(None, stream, libvirt.VIR_DOMAIN_CONSOLE_FORCE)
+        except libvirt.libvirtError as exc:
+            with contextlib.suppress(Exception):
+                stream.abort()
+            conn.close()
+            raise ConsoleUnavailableError(str(exc)) from exc
+
+        session = ConsoleSession(conn, stream, loop)
+        session.start()
+        return session
 
     # ------------------------------------------------------------------
     # Hardware editing

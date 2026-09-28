@@ -1,11 +1,26 @@
-"""WebSocket server that receives and dispatches agent commands."""
+"""WebSocket server that receives and dispatches agent commands.
+
+Authentication note: this server has no authentication of its own (neither
+/ws nor /console below check any credential). It relies entirely on network
+reachability - the agent's WS port (8091) is expected to only be reachable
+from the controller's network, the same trust model the existing /ws command
+channel already uses. The console endpoint reuses that same (lack of)
+authentication rather than inventing a new scheme for just this one path.
+"""
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import json
 import logging
 
-from agent.libvirt_driver import LibvirtDriver
+from agent.libvirt_driver import (
+    ConsoleUnavailableError,
+    DomainNotFoundError,
+    DomainNotRunningError,
+    LibvirtDriver,
+)
 from agent.config import settings
 from common.models import AgentCommand, AgentCommandResult
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
@@ -107,3 +122,74 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
             await websocket.close()
         except Exception:
             pass
+
+
+# ---------------------------------------------------------------------------
+# Serial console relay
+# ---------------------------------------------------------------------------
+
+# Close codes in the private-use WebSocket range (4000-4999), mirrored
+# verbatim by the controller's relay so the browser sees the real reason.
+_CLOSE_VM_NOT_FOUND = 4404
+_CLOSE_VM_NOT_RUNNING = 4409
+_CLOSE_CONSOLE_UNAVAILABLE = 4500
+
+
+@app.websocket("/console")
+async def console_endpoint(websocket: WebSocket, uuid: str) -> None:
+    """Relay a running domain's pty console as raw binary WebSocket frames.
+
+    Path: /console?uuid=<libvirt_uuid>. Only the controller is expected to
+    connect here (see module docstring for the auth/trust model). Rejects
+    with a 4xxx close code if the domain doesn't exist, isn't running, or
+    has no usable console; otherwise proxies bytes in both directions until
+    either side disconnects or the domain stops.
+    """
+    await websocket.accept()
+    loop = asyncio.get_running_loop()
+
+    try:
+        session = await loop.run_in_executor(None, _libvirt.open_console, uuid, loop)
+    except DomainNotFoundError:
+        await websocket.close(code=_CLOSE_VM_NOT_FOUND, reason="VM not found")
+        return
+    except DomainNotRunningError:
+        await websocket.close(code=_CLOSE_VM_NOT_RUNNING, reason="VM is not running")
+        return
+    except ConsoleUnavailableError as exc:
+        logger.warning("console unavailable for %s: %s", uuid, exc)
+        await websocket.close(code=_CLOSE_CONSOLE_UNAVAILABLE, reason="console unavailable")
+        return
+    except Exception:
+        logger.exception("Unexpected error opening console for %s", uuid)
+        await websocket.close(code=_CLOSE_CONSOLE_UNAVAILABLE, reason="internal error")
+        return
+
+    async def _browser_to_console() -> None:
+        try:
+            while True:
+                data = await websocket.receive_bytes()
+                session.write(data)
+        except WebSocketDisconnect:
+            pass
+
+    async def _console_to_browser() -> None:
+        while True:
+            data = await session.inbound_queue.get()
+            if data is None:
+                return  # console closed (domain stopped, stream error, ...)
+            await websocket.send_bytes(data)
+
+    tasks = [asyncio.create_task(_browser_to_console()), asyncio.create_task(_console_to_browser())]
+    try:
+        await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+    finally:
+        for t in tasks:
+            t.cancel()
+        for t in tasks:
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await t
+        # session.close() joins the reader thread; keep it off the event loop.
+        await loop.run_in_executor(None, session.close)
+        with contextlib.suppress(Exception):
+            await websocket.close()

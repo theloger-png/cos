@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from unittest.mock import patch, MagicMock
+import asyncio
+from unittest.mock import AsyncMock, patch, MagicMock
 
 import pytest
 
@@ -179,3 +180,134 @@ class TestVmApplyConfigCommand:
             ))
         assert result.success is True
         libvirt.apply_vm_config.assert_called_once_with("vm-uuid", {})
+
+
+# ---------------------------------------------------------------------------
+# /console WebSocket endpoint
+# ---------------------------------------------------------------------------
+
+
+class TestConsoleEndpoint:
+    def _websocket(self, receive_side_effect: list) -> AsyncMock:
+        ws = AsyncMock()
+        ws.accept = AsyncMock()
+        ws.close = AsyncMock()
+        ws.send_bytes = AsyncMock()
+        ws.receive_bytes = AsyncMock(side_effect=receive_side_effect)
+        return ws
+
+    @pytest.mark.asyncio
+    async def test_domain_not_found_closes_4404(self):
+        from agent import ws_server
+        from agent.libvirt_driver import DomainNotFoundError
+        from fastapi import WebSocketDisconnect
+
+        ws = self._websocket([WebSocketDisconnect()])
+        libvirt_mock = MagicMock()
+        libvirt_mock.open_console.side_effect = DomainNotFoundError("nope")
+
+        with patch("agent.ws_server._libvirt", libvirt_mock):
+            await ws_server.console_endpoint(ws, "missing-uuid")
+
+        ws.accept.assert_awaited_once()
+        ws.close.assert_awaited_once_with(code=4404, reason="VM not found")
+
+    @pytest.mark.asyncio
+    async def test_domain_not_running_closes_4409(self):
+        from agent import ws_server
+        from agent.libvirt_driver import DomainNotRunningError
+
+        ws = self._websocket([])
+        libvirt_mock = MagicMock()
+        libvirt_mock.open_console.side_effect = DomainNotRunningError("stopped")
+
+        with patch("agent.ws_server._libvirt", libvirt_mock):
+            await ws_server.console_endpoint(ws, "stopped-uuid")
+
+        ws.close.assert_awaited_once_with(code=4409, reason="VM is not running")
+
+    @pytest.mark.asyncio
+    async def test_console_unavailable_closes_4500(self):
+        from agent import ws_server
+        from agent.libvirt_driver import ConsoleUnavailableError
+
+        ws = self._websocket([])
+        libvirt_mock = MagicMock()
+        libvirt_mock.open_console.side_effect = ConsoleUnavailableError("no pty console")
+
+        with patch("agent.ws_server._libvirt", libvirt_mock):
+            await ws_server.console_endpoint(ws, "no-console-uuid")
+
+        ws.close.assert_awaited_once_with(code=4500, reason="console unavailable")
+
+    @pytest.mark.asyncio
+    async def test_unexpected_error_opening_console_closes_4500(self):
+        from agent import ws_server
+
+        ws = self._websocket([])
+        libvirt_mock = MagicMock()
+        libvirt_mock.open_console.side_effect = RuntimeError("boom")
+
+        with patch("agent.ws_server._libvirt", libvirt_mock):
+            await ws_server.console_endpoint(ws, "bad-uuid")
+
+        ws.close.assert_awaited_once_with(code=4500, reason="internal error")
+
+    @pytest.mark.asyncio
+    async def test_browser_disconnect_relays_input_and_cleans_up_session(self):
+        """Bytes typed in the browser reach session.write(); disconnect ends the relay."""
+        from agent import ws_server
+        from fastapi import WebSocketDisconnect
+
+        session = MagicMock()
+        session.inbound_queue = asyncio.Queue()  # left empty: never resolves on its own
+        session.write = MagicMock()
+        session.close = MagicMock()
+
+        ws = self._websocket([b"keystrokes", WebSocketDisconnect()])
+        libvirt_mock = MagicMock()
+        libvirt_mock.open_console.return_value = session
+
+        with patch("agent.ws_server._libvirt", libvirt_mock):
+            await asyncio.wait_for(ws_server.console_endpoint(ws, "running-uuid"), timeout=5)
+
+        session.write.assert_called_once_with(b"keystrokes")
+        session.close.assert_called_once()
+        ws.close.assert_awaited_once_with()
+
+    @pytest.mark.asyncio
+    async def test_console_eof_ends_relay_and_cancels_browser_read(self):
+        """A None on inbound_queue (domain stopped) ends the relay even if the browser is silent."""
+        from agent import ws_server
+
+        session = MagicMock()
+        session.inbound_queue = asyncio.Queue()
+        await session.inbound_queue.put(b"boot message")
+        await session.inbound_queue.put(None)
+        session.write = MagicMock()
+        session.close = MagicMock()
+
+        async def _never_resolves() -> bytes:
+            # A lambda returning asyncio.sleep(...) would NOT actually block here:
+            # AsyncMock only awaits a side_effect that is itself a coroutine
+            # function, so a plain lambda's returned-but-unawaited coroutine
+            # would come straight back, spinning the loop instead of blocking.
+            await asyncio.sleep(1000)
+            raise AssertionError("should have been cancelled first")
+
+        ws = AsyncMock()
+        ws.accept = AsyncMock()
+        ws.close = AsyncMock()
+        ws.send_bytes = AsyncMock()
+        # Never resolves on its own; only cancellation ends this task.
+        ws.receive_bytes = AsyncMock(side_effect=_never_resolves)
+
+        libvirt_mock = MagicMock()
+        libvirt_mock.open_console.return_value = session
+
+        with patch("agent.ws_server._libvirt", libvirt_mock):
+            await asyncio.wait_for(ws_server.console_endpoint(ws, "running-uuid"), timeout=5)
+
+        ws.send_bytes.assert_awaited_once_with(b"boot message")
+        session.close.assert_called_once()
+        ws.close.assert_awaited_once_with()

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import uuid
 import xml.etree.ElementTree as ET
@@ -9,6 +10,10 @@ from unittest.mock import MagicMock, patch, call
 
 import pytest
 from agent.libvirt_driver import (
+    ConsoleSession,
+    ConsoleUnavailableError,
+    DomainNotFoundError,
+    DomainNotRunningError,
     LibvirtDriver,
     _make_cloud_init_user_data,
     _make_cloud_init_meta_data,
@@ -1398,6 +1403,240 @@ class TestApplyVmConfigStaticIp:
         run.assert_not_called()
         assert len(result["nic_failures"]) == 1
         assert "attach boom" in result["nic_failures"][0]["reason"]
+
+
+# ---------------------------------------------------------------------------
+# ConsoleSession
+# ---------------------------------------------------------------------------
+
+
+class TestConsoleSessionRecv:
+    """The background thread's read side: stream -> inbound_queue."""
+
+    @pytest.mark.asyncio
+    async def test_forwards_data_then_none_sentinel_on_eof(self):
+        stream = MagicMock()
+        stream.recv.side_effect = [b"hello", b""]
+        conn = MagicMock()
+        session = ConsoleSession(conn, stream, asyncio.get_running_loop())
+
+        await asyncio.to_thread(session._run)
+
+        assert await session.inbound_queue.get() == b"hello"
+        assert await session.inbound_queue.get() is None
+
+    @pytest.mark.asyncio
+    async def test_retries_on_would_block_then_returns_data(self):
+        stream = MagicMock()
+        stream.recv.side_effect = [-2, b"data", b""]
+        conn = MagicMock()
+        session = ConsoleSession(conn, stream, asyncio.get_running_loop())
+
+        with patch("agent.libvirt_driver.time.sleep") as mock_sleep:
+            await asyncio.to_thread(session._run)
+
+        mock_sleep.assert_called_once()
+        assert await session.inbound_queue.get() == b"data"
+        assert await session.inbound_queue.get() is None
+
+    @pytest.mark.asyncio
+    async def test_stops_on_recv_error_without_raising(self):
+        import libvirt as _lv
+
+        stream = MagicMock()
+        stream.recv.side_effect = _lv.libvirtError("stream broken")
+        conn = MagicMock()
+        session = ConsoleSession(conn, stream, asyncio.get_running_loop())
+
+        await asyncio.to_thread(session._run)  # must not raise
+
+        assert await session.inbound_queue.get() is None
+
+    @pytest.mark.asyncio
+    async def test_stops_on_negative_error_code_other_than_would_block(self):
+        stream = MagicMock()
+        stream.recv.side_effect = [-1]
+        conn = MagicMock()
+        session = ConsoleSession(conn, stream, asyncio.get_running_loop())
+
+        await asyncio.to_thread(session._run)
+
+        assert await session.inbound_queue.get() is None
+
+    @pytest.mark.asyncio
+    async def test_cleans_up_stream_and_connection_on_exit(self):
+        stream = MagicMock()
+        stream.recv.side_effect = [b""]
+        conn = MagicMock()
+        session = ConsoleSession(conn, stream, asyncio.get_running_loop())
+
+        await asyncio.to_thread(session._run)
+
+        stream.finish.assert_called_once()
+        conn.close.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_cleanup_runs_even_if_finish_raises(self):
+        """A broken stream.finish() must not prevent conn.close() from running."""
+        stream = MagicMock()
+        stream.recv.side_effect = [b""]
+        stream.finish.side_effect = RuntimeError("boom")
+        conn = MagicMock()
+        session = ConsoleSession(conn, stream, asyncio.get_running_loop())
+
+        await asyncio.to_thread(session._run)  # must not raise
+
+        conn.close.assert_called_once()
+
+
+class TestConsoleSessionSend:
+    """The write side: write() -> outbound queue -> stream.send()."""
+
+    def _session(self, stream=None) -> ConsoleSession:
+        return ConsoleSession(MagicMock(), stream or MagicMock(), MagicMock())
+
+    def test_write_queues_bytes(self):
+        session = self._session()
+        session.write(b"abc")
+        assert session._outbound_queue.get_nowait() == b"abc"
+
+    def test_flush_outbound_sends_queued_data(self):
+        stream = MagicMock()
+        stream.send.return_value = 3
+        session = self._session(stream)
+        session.write(b"abc")
+
+        session._flush_outbound()
+
+        stream.send.assert_called_once_with(b"abc")
+
+    def test_flush_outbound_noop_when_empty(self):
+        stream = MagicMock()
+        session = self._session(stream)
+
+        session._flush_outbound()
+
+        stream.send.assert_not_called()
+
+    def test_send_all_retries_on_would_block(self):
+        stream = MagicMock()
+        stream.send.side_effect = [-2, 5]
+        session = self._session(stream)
+
+        with patch("agent.libvirt_driver.time.sleep") as mock_sleep:
+            session._send_all(b"abcde")
+
+        mock_sleep.assert_called_once()
+        assert stream.send.call_count == 2
+
+    def test_send_all_continues_on_partial_send(self):
+        stream = MagicMock()
+        stream.send.side_effect = [3, 3]
+        session = self._session(stream)
+
+        session._send_all(b"abcdef")
+
+        assert stream.send.call_count == 2
+        assert stream.send.call_args_list[0] == call(b"abcdef")
+        assert stream.send.call_args_list[1] == call(b"def")
+
+    def test_send_all_stops_without_raising_on_error(self):
+        import libvirt as _lv
+
+        stream = MagicMock()
+        stream.send.side_effect = _lv.libvirtError("boom")
+        session = self._session(stream)
+
+        session._send_all(b"abc")  # must not raise
+
+        stream.send.assert_called_once()
+
+
+class TestConsoleSessionClose:
+    def test_close_without_start_is_safe(self):
+        session = ConsoleSession(MagicMock(), MagicMock(), MagicMock())
+        session.close()  # must not raise (thread was never started)
+        assert session._stop_event.is_set()
+
+    def test_close_is_idempotent(self):
+        session = ConsoleSession(MagicMock(), MagicMock(), MagicMock())
+        session.close()
+        session.close()  # must not raise the second time either
+
+
+# ---------------------------------------------------------------------------
+# LibvirtDriver.open_console
+# ---------------------------------------------------------------------------
+
+
+class TestOpenConsole:
+    @pytest.mark.asyncio
+    async def test_raises_domain_not_found(self, driver):
+        import libvirt as _lv
+
+        conn = MagicMock()
+        conn.lookupByUUIDString.side_effect = _lv.libvirtError("no such domain")
+
+        with patch("libvirt.open", return_value=conn):
+            with pytest.raises(DomainNotFoundError):
+                driver.open_console("missing-uuid", asyncio.get_running_loop())
+
+        conn.close.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_raises_domain_not_running(self, driver):
+        domain = MagicMock()
+        domain.state.return_value = (5, 0)  # VIR_DOMAIN_SHUTOFF
+        conn = MagicMock()
+        conn.lookupByUUIDString.return_value = domain
+
+        with patch("libvirt.open", return_value=conn):
+            with pytest.raises(DomainNotRunningError):
+                driver.open_console("stopped-uuid", asyncio.get_running_loop())
+
+        conn.close.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_raises_console_unavailable_when_openconsole_fails(self, driver):
+        import libvirt as _lv
+
+        domain = MagicMock()
+        domain.state.return_value = (1, 0)  # VIR_DOMAIN_RUNNING
+        domain.openConsole.side_effect = _lv.libvirtError("no console device")
+        stream = MagicMock()
+        conn = MagicMock()
+        conn.lookupByUUIDString.return_value = domain
+        conn.newStream.return_value = stream
+
+        with patch("libvirt.open", return_value=conn):
+            with pytest.raises(ConsoleUnavailableError):
+                driver.open_console("no-console-uuid", asyncio.get_running_loop())
+
+        stream.abort.assert_called_once()
+        conn.close.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_success_opens_console_with_force_flag_and_starts_session(self, driver):
+        import libvirt as _lv
+
+        domain = MagicMock()
+        domain.state.return_value = (1, 0)  # VIR_DOMAIN_RUNNING
+        stream = MagicMock()
+        stream.recv.return_value = b""  # immediate EOF so the thread exits fast
+        conn = MagicMock()
+        conn.lookupByUUIDString.return_value = domain
+        conn.newStream.return_value = stream
+
+        with patch("libvirt.open", return_value=conn):
+            session = driver.open_console("running-uuid", asyncio.get_running_loop())
+
+        try:
+            conn.newStream.assert_called_once_with(_lv.VIR_STREAM_NONBLOCK)
+            domain.openConsole.assert_called_once_with(None, stream, _lv.VIR_DOMAIN_CONSOLE_FORCE)
+            assert isinstance(session, ConsoleSession)
+            assert await session.inbound_queue.get() is None  # EOF sentinel
+        finally:
+            await asyncio.to_thread(session.close)
 
 
 # ---------------------------------------------------------------------------
