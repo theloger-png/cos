@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# cos-install.sh - install and update COS.
+# cos-install.sh - install, update, back up and restore COS.
 #
 # This script is idempotent: it is safe to re-run on an already-installed
 # controller or agent machine. A re-run also doubles as the update path -
@@ -21,8 +21,17 @@
 #   These are only used the first time (when /opt/cos/config/agent.env does
 #   not exist yet); on every later run the existing agent.env is left alone.
 #
+# Controller-only backup/restore:
+#   --backup [FILE]                Write a backup of the DB + secrets + config
+#                                   to FILE (default ~/cos-backup-<timestamp>.tar.gz)
+#                                   and exit without installing anything.
+#   --restore FILE                 Run a normal controller install, then
+#                                   restore the DB + secrets + config from FILE.
+#                                   Prompts for confirmation unless --yes.
+#
 # Non-negotiable rule: a re-run NEVER regenerates or overwrites secrets,
-# credentials, user data or user-edited config.
+# credentials, user data or user-edited config. The only exception is an
+# explicit --restore, whose entire purpose is to replace them from a backup.
 #
 set -euo pipefail
 set -E  # inherit the ERR trap into functions and subshells
@@ -31,6 +40,10 @@ REPO_DIR=$(cd "$(dirname "$0")/.." && pwd)
 
 ROLE=""
 ASSUME_YES=0
+BACKUP_MODE=0
+BACKUP_FILE=""
+RESTORE_MODE=0
+RESTORE_FILE=""
 CONTROLLER_URL="${COS_INSTALL_CONTROLLER_URL:-}"
 CONTROLLER_API_KEY="${COS_INSTALL_CONTROLLER_API_KEY:-}"
 
@@ -39,7 +52,7 @@ STEP_TOTAL=0
 CURRENT_STEP="argument parsing"
 
 usage() {
-    sed -n '2,26p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,35p' "$0" | sed 's/^# \{0,1\}//'
     exit 1
 }
 
@@ -72,6 +85,21 @@ while [[ $# -gt 0 ]]; do
             [[ -n "$ROLE" ]] || usage
             shift 2
             ;;
+        --backup)
+            BACKUP_MODE=1
+            if [[ $# -ge 2 && "$2" != --* ]]; then
+                BACKUP_FILE="$2"
+                shift 2
+            else
+                shift 1
+            fi
+            ;;
+        --restore)
+            RESTORE_MODE=1
+            RESTORE_FILE="${2:-}"
+            [[ -n "$RESTORE_FILE" ]] || usage
+            shift 2
+            ;;
         --yes)
             ASSUME_YES=1
             shift
@@ -94,9 +122,15 @@ while [[ $# -gt 0 ]]; do
 done
 
 [[ "$ROLE" == "controller" || "$ROLE" == "agent" ]] || usage
+[[ "$BACKUP_MODE" -eq 1 && "$ROLE" != "controller" ]] && die "--backup is only supported with --role controller"
+[[ "$RESTORE_MODE" -eq 1 && "$ROLE" != "controller" ]] && die "--restore is only supported with --role controller"
+[[ "$BACKUP_MODE" -eq 1 && "$RESTORE_MODE" -eq 1 ]] && die "--backup and --restore cannot be used together"
 
-if [[ "$ROLE" == "controller" ]]; then
+if [[ "$BACKUP_MODE" -eq 1 ]]; then
+    STEP_TOTAL=4
+elif [[ "$ROLE" == "controller" ]]; then
     STEP_TOTAL=22
+    [[ "$RESTORE_MODE" -eq 1 ]] && STEP_TOTAL=29
 else
     STEP_TOTAL=18
 fi
@@ -127,6 +161,120 @@ install_unit_if_changed() {
         systemctl daemon-reload
         echo "  Unit file installed/updated: $unit_path"
     fi
+}
+
+# --- Backup mode (controller only, exits without installing) ----------------
+
+do_backup() {
+    step "Checking backup prerequisites"
+    [[ "$(id -u)" -eq 0 ]] || die "must be run as root"
+    command -v tar >/dev/null 2>&1 || die "tar not found"
+    systemctl is-active --quiet postgresql || die "postgresql is not running - cannot pg_dump"
+    [[ -d /opt/cos ]] || die "/opt/cos not found - is this a controller machine?"
+
+    local backup_user backup_home out tmpdir
+    backup_user="${SUDO_USER:-root}"
+    backup_home=$(getent passwd "$backup_user" | cut -d: -f6)
+    [[ -n "$backup_home" ]] || backup_home="$HOME"
+
+    if [[ -n "$BACKUP_FILE" ]]; then
+        out="$BACKUP_FILE"
+    else
+        out="${backup_home}/cos-backup-$(date +%Y%m%d-%H%M).tar.gz"
+    fi
+
+    tmpdir=$(mktemp -d)
+
+    step "Dumping the cos database"
+    sudo -u postgres pg_dump cos > "${tmpdir}/cos.sql" || die "pg_dump failed"
+
+    step "Collecting secrets and configuration"
+    for f in /opt/cos/admin_api_key /opt/cos/admin_password; do
+        [[ -f "$f" ]] && cp -p "$f" "${tmpdir}/$(basename "$f")"
+    done
+    if [[ -d /opt/cos/config ]]; then
+        cp -rp /opt/cos/config "${tmpdir}/config"
+    fi
+
+    step "Writing backup archive"
+    tar -czf "$out" -C "$tmpdir" .
+    rm -rf "$tmpdir"
+    chmod 600 "$out"
+    if [[ -n "${SUDO_USER:-}" ]]; then
+        chown "$backup_user":"$(id -gn "$backup_user")" "$out" 2>/dev/null || true
+    fi
+
+    echo ""
+    echo "=== Backup written to: $out (mode 600) ==="
+    exit 0
+}
+
+if [[ "$BACKUP_MODE" -eq 1 ]]; then
+    do_backup
+fi
+
+# --- Restore (controller only): applied after the normal install below ------
+
+do_restore() {
+    [[ -f "$RESTORE_FILE" ]] || die "backup file not found: $RESTORE_FILE"
+
+    if [[ "$ASSUME_YES" -ne 1 ]]; then
+        echo ""
+        echo "WARNING: this will DROP and recreate the 'cos' database, replacing"
+        echo "all current data with the contents of: $RESTORE_FILE"
+        read -r -p "Type 'yes' to continue: " CONFIRM
+        [[ "$CONFIRM" == "yes" ]] || die "restore aborted by operator"
+    fi
+
+    step "Restoring from backup: $RESTORE_FILE"
+    local tmpdir
+    tmpdir=$(mktemp -d)
+    tar -xzf "$RESTORE_FILE" -C "$tmpdir"
+    [[ -f "${tmpdir}/cos.sql" ]] || die "backup archive is missing cos.sql - not a valid COS backup"
+
+    step "Stopping cos-controller for restore"
+    systemctl stop cos-controller
+
+    step "Dropping and recreating the cos database"
+    sudo -u postgres psql -c "DROP DATABASE IF EXISTS cos"
+    sudo -u postgres psql -c "CREATE DATABASE cos OWNER cos"
+
+    step "Loading database dump"
+    sudo -u postgres psql -q cos < "${tmpdir}/cos.sql"
+
+    step "Restoring secrets and config from backup"
+    if [[ -f "${tmpdir}/admin_api_key" ]]; then
+        cp -p "${tmpdir}/admin_api_key" /opt/cos/admin_api_key
+        chown cos:cos /opt/cos/admin_api_key
+        chmod 640 /opt/cos/admin_api_key
+    fi
+    if [[ -f "${tmpdir}/admin_password" ]]; then
+        cp -p "${tmpdir}/admin_password" /opt/cos/admin_password
+        chown cos:cos /opt/cos/admin_password
+        chmod 640 /opt/cos/admin_password
+    fi
+    if [[ -d "${tmpdir}/config" ]]; then
+        cp -rp "${tmpdir}/config/." /opt/cos/config/
+        chown -R cos:cos /opt/cos/config
+    fi
+    rm -rf "$tmpdir"
+
+    step "Running alembic upgrade head (post-restore)"
+    COS_DATABASE_URL=postgresql+asyncpg://cos:cos@localhost/cos \
+        /opt/cos/venv/bin/alembic --config "$REPO_DIR/alembic.ini" upgrade head
+
+    step "Starting cos-controller"
+    systemctl start cos-controller
+    local ready
+    ready=$(wait_for_controller)
+    if [[ "$ready" -eq 1 ]]; then
+        echo "  [OK] controller answered health check after restore"
+    else
+        echo "  [FAIL] controller did not answer within 30s after restore - check: journalctl -u cos-controller -n 50" >&2
+    fi
+
+    echo ""
+    echo "=== Restore from $RESTORE_FILE complete ==="
 }
 
 # ===========================================================================
@@ -198,7 +346,7 @@ step "Installing Python dependencies"
 /opt/cos/venv/bin/pip install -r "$REPO_DIR/requirements.txt" -q
 
 # ===========================================================================
-# CONTROLLER (steps 10-22)
+# CONTROLLER (steps 10-22, +restore steps 23-29 if --restore)
 # ===========================================================================
 
 if [[ "$ROLE" == "controller" ]]; then
@@ -396,6 +544,10 @@ EOF
         echo ""
         echo "=== COS Controller installation: FAIL (see [FAIL] lines above) ===" >&2
         exit 1
+    fi
+
+    if [[ "$RESTORE_MODE" -eq 1 ]]; then
+        do_restore
     fi
 
 fi
