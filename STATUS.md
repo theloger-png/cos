@@ -91,22 +91,23 @@
 - nos_api_key column removed from nodes (migration f6a7b8c0d1e2)
 - All migrations tracked in alembic/versions/
 
-## Known Limitations / TODO
+## Known Limitations / Known Issues
 
-### Phase 1 Remaining
-- feature/ovs-networking branch not yet merged to main
-- Static IP on add-NIC only takes effect for stopped VMs whose seed state was recorded by this version (VMs created earlier keep their seed unchanged and report a nic_failures entry); no live/hot-plug static IP
-- Live NIC IP display and static-IP-on-add-NIC only work for VMs created after these changes (they need the guest-agent channel, qemu-guest-agent and the seed sidecar); no retrofit of older VMs, by design and not planned
-- Guest OS support for cloud-init-based provisioning (qemu-guest-agent install/enable, cloud-init network-config in general) is scoped to Linux distributions with cloud-init and a Debian/RHEL-family package manager (Ubuntu, Debian, RHEL, Rocky, AlmaLinux, etc. - expected to work via cloud-init's cross-distro package module, though only Ubuntu has been actually tested end-to-end this session). Windows guests are NOT supported by any of this session's features (live IP display, static IP at creation or add-NIC) - Windows requires a different guest agent installation mechanism (not cloud-init #cloud-config, which is Linux-only) and a different provisioning tool entirely (e.g. cloudbase-init). VMTemplate.os_type is currently a free-text field not used to branch any provisioning logic, so nothing currently prevents an operator from creating a "Windows" template that would silently fail cloud-init processing. Windows support is not planned in the current phase.
-- VM seed ISOs and their .seed.json sidecar files in /var/lib/cos/seeds/ are not cleaned up when a VM is destroyed (pre-existing ISO leak, the sidecar has the same issue)
-- __pycache__/*.pyc files are tracked in git, causing noisy git status after any local test run; should be untracked and added to .gitignore
-- No automated script yet for the full nos-br + OVS internal port + netplan bootstrap from scratch (done manually on cos-node1; see scripts/migrate-mgmt-to-ovs.sh for the migration pattern, now documented step-by-step in INSTALL.md §4.3) - a "--role node" unified first-node installer (whiptail menu, OVS bridge with automatic rollback if connectivity is lost, controller VM creation, local agent) would still be a useful addition to scripts/
-- Controller HA (PostgreSQL replication, Keepalived VIP)
-- HTTPS/SSL for portal and API
-- The "cos" PostgreSQL role/database still uses the hardcoded password "cos" (see the TODO comment in scripts/cos-install.sh) - move to a generated secret stored under /opt/cos before this is used beyond a lab/dev network
-- No automatic scheduled database backups yet - scripts/cos-install.sh --backup is manual/on-demand only (see TODO.md)
-- No adoption of pre-existing libvirt domains by a new/rebuilt controller (a controller created via --restore or from scratch has no way to discover and adopt VMs that are already running on nodes)
-- No optional customized installer ISO (an Ubuntu 24.04 ISO preseeded with the COS repo/install script) - nodes are installed from stock Ubuntu media today (see INSTALL.md §3)
+### Limitations (By Design or Deferred)
+- Static IP on add-NIC only takes effect for stopped VMs whose seed state was recorded by this version (VMs created earlier keep their seed unchanged and report a nic_failures entry); no live/hot-plug static IP.
+- Live NIC IP display and static-IP-on-add-NIC only work for VMs created after these changes (they need the guest-agent channel, qemu-guest-agent and the seed sidecar); no retrofit of older VMs, by design and not planned.
+- Guest OS support for cloud-init-based provisioning is scoped to Linux distributions with cloud-init and a Debian/RHEL-family package manager (Ubuntu, Debian, RHEL, Rocky, AlmaLinux, etc.). Windows guests are NOT supported - they require cloudbase-init or similar, not cloud-init #cloud-config.
+- VM seed ISOs and their .seed.json sidecar files in /var/lib/cos/seeds/ are not cleaned up when a VM is destroyed (pre-existing ISO leak).
+- No adoption of pre-existing libvirt domains by a new/rebuilt controller (they keep running but are invisible until restored from a backup or adopted); there is no adoption feature yet.
+
+### Known Issues
+- **Agent WebSocket (/ws and /console) has no authentication** (relies on network reachability); needs a shared secret before external exposure.
+- Postgres password is hardcoded cos/cos.
+- No HTTPS yet (portal and API on plain HTTP).
+- apt-get install on already installed packages upgrades them (seen with libvirt on a node with running VMs); install script should check with dpkg -s first and offer an explicit --upgrade-system flag.
+- Re-exec after a git pull that changes the script itself has not been exercised on a real machine yet.
+- Console browser edge cases not yet validated: window resize, VM stopped while console is open, same console in two tabs, stopped-VM button state.
+- Portal bundle is over 1 MB (no code splitting) and npm reports audit warnings (2 moderate, 7 high).
 
 ### Known Issues
 - node-1 (manually registered, no agent) shows "0s ago" heartbeat - cosmetic only
@@ -145,35 +146,56 @@
 
 ## Recent Changes (2026-09-28)
 
-All on branch feature/vm-console.
+All on branches feature/vm-console and feature/ovs-networking (merged into main).
 
-- **Web serial console: done.** Agent opens a libvirt pty serial stream per
-  running VM over its own /console WebSocket (fixed in this session: the
-  agent wasn't running the libvirt event loop, so the stream never
-  delivered any data until a VM event fired); controller issues a
-  short-lived single-use ticket (POST /api/v1/vms/{id}/console-ticket) and
-  relays raw bytes between the browser and the agent over its own
-  WebSocket (never touches libvirt directly); portal renders it with
-  xterm.js at /vms/{id}/console, linked from a "Console" button on the VMs
-  page (enabled only while running). nginx installs a dedicated
-  websocket-upgrade.conf map and long proxy_read/send_timeout (3600s) so
-  the long-lived console session isn't cut by nginx's default ~60s
-  timeout.
-- **cos-install.sh made fully idempotent, with backup/restore added:**
-  - Re-running the script on an already-installed controller or agent is
-    now also the update path, with zero manual steps (see the Deployment
-    section above for the full list of what changed and INSTALL.md for
-    the operator-facing guide)
-  - Non-negotiable invariant: a re-run never regenerates or overwrites
-    secrets, credentials, user data, or user-edited config
-  - New: --backup [FILE] / --restore FILE for the controller role
-  - New: INSTALL.md (full bare-metal-to-cluster guide) and a rewritten,
-    de-NOS'd README.md
-  - New: tests/unit/test_cos_install_script.py - static checks (syntax,
-    regression guards against reintroducing destructive behavior, step
-    numbering consistency) plus argument-parsing/validation tests that run
-    without root (the validation for --backup/--restore/--role happens
-    before the root check)
+### Web Serial Console
+- Agent: serial pty + console elements in the domain XML for new VMs;
+  ConsoleSession bridges the libvirt console stream to asyncio; new
+  WS endpoint /console?uuid=<libvirt_uuid> on the agent (:8091).
+- Root cause fixed along the way: a non-blocking libvirt virStream only
+  delivers data when the libvirt event loop is running; the agent now
+  registers virEventRegisterDefaultImpl() once, before the first
+  libvirt.open(), and pumps virEventRunDefaultImpl() in a daemon thread.
+- Controller: POST /api/v1/vms/{id}/console-ticket (one-time ticket,
+  30 s, in-memory store) and WS /api/v1/vms/{id}/console?ticket=...
+  relaying binary frames to the agent. Close codes: 4401 invalid or
+  expired ticket, 4404 VM not found, 4409 VM not running, 4500 console
+  unavailable, 4503 node offline, 1011 unexpected error.
+- nginx: WebSocket upgrade map in /etc/nginx/conf.d/websocket-upgrade.conf,
+  long read/send timeouts on /api/.
+- Portal: /vms/:id/console page with xterm.js, Console button on the VMs
+  page (running VMs only), manual reconnect, close-code messages.
+- Validated end to end on real hardware: browser -> nginx -> controller
+  -> agent -> libvirt -> VM, typing and output both directions.
+
+### cos-install.sh Idempotent + Backup/Restore
+- Now doubles as the update path: secrets and agent.env never regenerated,
+  git update with checkout + pull --ff-only and a guarded re-exec, safe
+  portal swap (portal.old rename, rollback on failure), nginx backup +
+  nginx -t + automatic restore on failure, unit files rewritten only
+  when changed, final OK/FAIL verification block.
+- New: --role controller --backup [file] and --restore <file> [--yes]
+  (pg_dump + secrets + config in a 0600 tar.gz).
+- New: INSTALL.md (full bare-metal-to-cluster guide) and a rewritten,
+  de-NOS'd README.md.
+- requirements.txt now uses sqlalchemy[asyncio] (pulls in greenlet);
+  pytest and pytest-asyncio moved to requirements-dev.txt.
+- Untracked __pycache__/*.pyc and ignored them.
+- feature/ovs-networking and feature/vm-console merged into main.
+
+### Validation Performed (Real Hardware)
+- Re-run of --role controller on existing controller: secrets, portal,
+  nginx, migrations all unchanged and OK.
+- Re-run of --role agent on cos-node1 without prompts, VMs untouched.
+- Backup, then restore on a separate test VM: old admin password and API
+  key work, secret hashes identical, all 7 VMs and inventory restored.
+- Fresh install on a clean Ubuntu 24.04 VM with no manual steps (after
+  the greenlet fix), zero tracebacks.
+
+### Bugs Found and Fixed by Validation
+- Portal safe swap used "mv -T" over a non-empty directory.
+- Script replaced itself with git pull mid-run (added guarded re-exec).
+- Missing greenlet on a clean venv.
 
 ## Recent Changes (2026-09-24)
 All on branch feature/ovs-networking (not yet merged to main).

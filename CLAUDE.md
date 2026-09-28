@@ -34,6 +34,11 @@ Always read STATUS.md before implementing any new module.
 - VM NICs use OVS native VLAN tagging via libvirt domain XML - no external VLAN provisioning step is needed
 - A Network in COS (name + vlan_id + optional cidr/gateway) is purely a database record used to pick a VLAN tag at VM NIC creation time
 
+## Console
+- Web-based serial console path: browser -> nginx -> controller WS relay -> agent WS /console -> libvirt openConsole stream
+- The controller never touches libvirt directly; it relays raw bytes between the browser and the agent
+- Authentication: one-time short-lived ticket issued by POST /api/v1/vms/{id}/console-ticket, validated at WS handshake
+
 ## Testing
 - Framework: pytest
 - All new code must have unit tests in tests/unit/
@@ -70,6 +75,8 @@ The correct sequence after `git pull` on either `cos-node1` (agent) or the contr
 2. Restart the service: `sudo systemctl restart cos-agent` (on nodes) or `sudo systemctl restart cos-controller` (on controller VM)
 
 Both services require this sequence, not just one. Skipping the reinstall step silently leaves stale code running. The main symptom is new fields, parameters, or behavior appearing to have no effect even though `git log` on disk correctly shows the latest commit. This disconnect can cost significant debugging time since every other part of the chain looks correct.
+
+Note (2026-09-28): `cos-install.sh` now automates this entire process - just re-run it to update any machine. It handles git pull, package reinstall, and service restart as a single atomic operation (with rollback on failure for portal and nginx). Never manually copy nginx or portal files. Never paste `admin_password` or `admin_api_key` into chats, logs, or external services - they are stored in `/opt/cos/` on disk and fetched when needed.
 
 ## Do Not Implement Yet
 - K3s/container management

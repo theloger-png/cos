@@ -10,13 +10,14 @@ networking daemon or API involved.
 - Multi-node KVM VM lifecycle: create, start, stop, reboot, destroy, migrate
 - Native OVS VLAN tagging per VM NIC (no external network controller)
 - Web portal (React + Tailwind + shadcn/ui): dashboard, nodes, VMs,
-  templates, networks, tenants, hardware editor
-- Web-based serial console for running VMs, streamed over WebSocket
+  templates, networks, tenants, hardware editor, web console
+- Web-based serial console for running VMs (xterm.js over WebSocket)
 - Cloud-init based provisioning: per-VM generated credentials, static IP or
   DHCP, qemu-guest-agent for live IP reporting
 - Dual authentication: JWT (portal users) and X-API-Key (agents/scripts)
 - Multi-tenant resource scoping
-- Idempotent installer that doubles as the update path, plus backup/restore
+- Idempotent installer that doubles as the update path (re-run to update)
+- Backup and restore (single-file tar.gz with database, secrets, config)
 
 See [INSTALL.md](INSTALL.md) for the full install guide (from a bare
 Ubuntu 24.04 node to a running cluster), including updates, backup/restore

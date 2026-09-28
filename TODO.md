@@ -1,6 +1,31 @@
 # COS Project TODO
 
+## Completed
+
+### Web Console
+- [x] Web serial console for running VMs (xterm.js, ticket-authenticated WebSocket relay through the controller)
+- [x] Web console endpoint behind portal authentication (short-lived single-use ticket, JWT/X-API-Key + tenant ownership check)
+
+### Deployment / Install
+- [x] Idempotent cos-install.sh that doubles as the update path
+- [x] Backup/restore (--backup / --restore)
+- [x] INSTALL.md (full bare-metal-to-cluster guide)
+- [x] README.md rewritten (de-NOS'd)
+
 ## Next Up
+
+### Console Validation and Edge Cases
+- [ ] Validate console edge cases: window resize, VM stopped while console is open, same console in two tabs, stopped-VM button state
+- [ ] Validate re-exec path: git pull that changes the script itself, on a real machine
+
+### Deployment / Security / Reliability
+- [ ] Install script: dpkg -s check before apt install, --upgrade-system flag
+- [ ] Shared secret between controller and agent (protects /ws and /console)
+- [ ] PostgreSQL password: generate at first install, store in a root-only file, use it in systemd unit and alembic URL; migration path for existing installs
+- [ ] HTTPS for portal and API
+- [ ] Scheduled automatic database backups, and a documented way to keep them off the controller VM
+- [ ] VM adoption: import pre-existing libvirt domains (use the agent's vm_list command) into the controller database
+- [ ] cos-update wrapper or documented one-liner for updating all nodes
 
 ### Portal CRUD for Templates and Networks
 - [ ] Edit form for Templates (update cloud_init_user, resource defaults)
@@ -12,41 +37,49 @@
 - [ ] CD/ISO management (upload, attach to VM, set boot order)
 - [ ] Create VM without template (blank disk + boot from attached ISO)
 
-### Web Console
-- [x] Web serial console for running VMs (xterm.js, ticket-authenticated WebSocket relay through the controller) - done, see STATUS.md 2026-09-28
-- [x] Web console endpoint behind portal authentication - done (short-lived single-use ticket, same JWT/X-API-Key + tenant ownership check as the rest of /vms)
-- [ ] noVNC web console for VM access (graphical, separate from the serial console above; investigated NIC hotplug feasibility - confirmed working)
+### Web Console - Advanced (Graphical)
+- [ ] noVNC web console for VM access (graphical, separate from the serial console)
 - [ ] Design: how to integrate the graphical console with the existing hardware editor flow
 
-### Deployment / Install
-- [x] Idempotent cos-install.sh that doubles as the update path - done, see STATUS.md 2026-09-28
-- [x] Backup/restore (--backup / --restore) - done, see STATUS.md 2026-09-28
-- [ ] PostgreSQL "cos" role/database password is hardcoded to "cos" - move to a generated secret stored under /opt/cos (see the TODO comment in scripts/cos-install.sh)
-- [ ] Agent WebSocket (port 8091) has no authentication of its own - add a shared secret (or similar) between controller and agent
-- [ ] HTTPS for the portal and the controller API
-- [ ] Adoption of pre-existing libvirt domains by a new/rebuilt controller (so a lost-and-restored controller, or a fresh one, can discover VMs already running on nodes instead of only what --restore brought back)
-- [ ] Automatic scheduled database backups (today's --backup is manual/on-demand only)
-- [ ] "--role node": unified first-node install (whiptail menu, OVS bridge setup with automatic rollback if connectivity is lost, controller VM creation, local agent install) in a single run
-- [ ] Optional customized installer ISO (Ubuntu 24.04 preseeded with the COS repo + install script) to skip the manual git-clone-and-run step in INSTALL.md §3-4
+## Planned - Larger Initiatives
 
-## Deferred Features
+### Unified First-Node Installer
+- [ ] "--role node": unified first-node install for a clean Ubuntu 24.04 node
+  - Run after the standard Ubuntu installer (static IP set there)
+  - whiptail menu: hostname, role, management IP/prefix, gateway, DNS, management VLAN (empty=untagged or a number=tagged)
+  - Open vSwitch bridge with automatic rollback if connectivity is lost (like "commit confirmed")
+  - Creation of the controller VM from the Ubuntu cloud image
+  - Controller install inside it
+  - Local agent install with the credentials passed automatically
+  - Must be validated on real hardware
+- [ ] Optional customized installer ISO (autoinstall) only if many nodes need installing; not needed now
+
+### VM Live Migration
+- [ ] VM live migration between nodes: libvirt supports it natively, agent already has vm_migrate command, but untested
+  - Requires a second physical node
+  - First version: live migration with disk copy over the dedicated migration VLAN
+  - Later: shared storage (NFS first, Ceph when 3+ nodes)
+  - Requirements to document: same OVS bridge and VLANs on destination, compatible CPU, seed ISOs and backing files copied over, node_id updated in database, rollback on failure
+
+### Multi-POP Design
+- [ ] Multi-POP design notes (treat each POP as a failure and storage domain, live migration only inside a POP, regional controllers with thin global layer instead of one controller for 100 nodes; L2 between POPs via VXLAN with one VNI per tenant network)
+  - VTEP options: (A) OVS static VXLAN (does not scale), (C) Linux bridge + kernel VXLAN + FRR EVPN (industry standard but departs from OVS), (D) COS controller as control plane
+  - Constraints: MTU (VXLAN adds ~50 bytes), encryption over public links (IPsec/WireGuard), ARP suppression, BUM with ingress replication, loop protection, witness vote for 2-node cluster (Postgres/etcd)
+- [ ] Networking model decision pending: keep OVS with static VXLAN for a few sites versus moving tenant networking to Linux bridge + FRR EVPN
+
+## Deferred - Lower Priority
 
 ### Edge Router (Future)
 - [ ] Dedicated VM running NOS will serve as L3 edge/gateway for tenant VLANs
   - Single trunk interface on nos-br carrying all tenant VLANs
   - Per-VLAN IRBs configured manually via nos-cli inside edge VM
-  - COS Network.cidr/gateway fields remain informational only for now
+  - COS Network.cidr/gateway remain informational only for now
   - No automatic IRB provisioning until edge node/VM is set up
-  - Revisit when dedicated edge node/VM is in place
 
 ### AWS-Style Routing/Firewall/NAT Menu (Future)
-- [ ] Once edge router exists, add COS UI section for:
-  - Route tables
-  - Security groups
-  - NAT rules
-  - Configured against edge NOS via REST API (similar pattern to VLAN broadcast)
+- [ ] Once edge router exists, add COS UI section for route tables, security groups, NAT rules (via edge NOS REST API)
 
 ### Portal Bundle Size Optimization
-- [ ] Portal bundle is 811KB (gzip 250KB) - vite warns about chunk size
+- [ ] Portal bundle is over 1 MB (no code splitting)
   - Consider code-splitting (dynamic imports per route)
-  - Not urgent, deferred after edge router work
+  - npm reports audit warnings (2 moderate, 7 high)

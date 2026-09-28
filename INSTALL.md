@@ -49,9 +49,11 @@ manages.
 - Internet access from every machine (controller and nodes) during
   install/update - packages, the Node.js 20 apt repo, and the Ubuntu cloud
   image are downloaded from the internet.
-- **Static IPs everywhere.** There is no DHCP on the COS management
-  network; every physical node and the controller VM need a fixed IP
-  assigned during OS install (see §3) or via cloud-init (see §5).
+- **Static IPs on the management network.** The COS management network
+  has no DHCP - every physical node and the controller VM must have a
+  static IP. Assign it during the Ubuntu OS installer (see §3) by selecting
+  the management NIC and entering an IP address, prefix, gateway, and DNS.
+  Once configured there, the IP persists across reboots.
 - Network reachability between machines on the management network:
 
   | From | To | Port | Purpose |
@@ -340,9 +342,12 @@ and cannot manage them until they are adopted (not implemented yet, see
   `/opt/cos/config/agent.env`, and confirm TCP 8090 is reachable from the
   node to the controller.
 
-**Known gaps** (tracked in `TODO.md`):
+**Known gaps** (tracked in `TODO.md` and detailed in `STATUS.md` Known Limitations / Known Issues):
 - No HTTPS yet - the portal and API are plain HTTP.
 - The agent's WebSocket port (8091) has no authentication of its own; it
-  relies entirely on network reachability from the controller.
+  relies entirely on network reachability from the controller - needs a
+  shared secret before the agent port is exposed to less trusted networks.
 - No controller HA (single PostgreSQL instance, no failover).
 - No adoption of pre-existing libvirt domains by a new/rebuilt controller.
+- PostgreSQL password is hardcoded "cos" - should be generated and stored
+  securely before production use.
