@@ -97,6 +97,7 @@
 - node-1 (manually registered, no agent) shows "0s ago" heartbeat - cosmetic only
 - Portal bundle size >500KB (no code splitting yet) - performance optimization deferred
 - VITE_API_URL hardcoded at build time in .env.production - needs dynamic config for multi-env
+- **The agent's WebSocket server (port 8091, both /ws and /console) has no authentication of its own** - it relies entirely on network reachability (the agent port is expected to only be reachable from the controller's network), same trust model for the command channel and the new VM console relay alike. Needs a shared secret (or similar) between controller and agent before the agent port is reachable from anywhere less trusted than today.
 
 ## Phase 2 - Planned
 

@@ -1565,6 +1565,90 @@ class TestConsoleSessionClose:
 
 
 # ---------------------------------------------------------------------------
+# libvirt event loop registration (required for non-blocking stream I/O)
+# ---------------------------------------------------------------------------
+
+
+class TestEnsureLibvirtEventLoop:
+    def _reset(self, monkeypatch):
+        """Isolate from whatever real/prior state other tests left behind."""
+        import agent.libvirt_driver as mod
+
+        monkeypatch.setattr(mod, "_event_loop_started", False)
+        return mod
+
+    def test_first_call_registers_impl_and_starts_a_daemon_thread(self, monkeypatch):
+        mod = self._reset(monkeypatch)
+
+        with patch.object(mod.libvirt, "virEventRegisterDefaultImpl") as mock_register, \
+             patch.object(mod.threading, "Thread") as mock_thread_cls:
+            mock_thread = MagicMock()
+            mock_thread_cls.return_value = mock_thread
+
+            mod._ensure_libvirt_event_loop()
+
+        mock_register.assert_called_once_with()
+        mock_thread_cls.assert_called_once_with(
+            target=mod._pump_libvirt_events_forever,
+            name="libvirt-event-loop",
+            daemon=True,
+        )
+        mock_thread.start.assert_called_once_with()
+        assert mod._event_loop_started is True
+
+    def test_second_call_does_nothing(self, monkeypatch):
+        mod = self._reset(monkeypatch)
+
+        with patch.object(mod.libvirt, "virEventRegisterDefaultImpl") as mock_register, \
+             patch.object(mod.threading, "Thread") as mock_thread_cls:
+            mock_thread_cls.return_value = MagicMock()
+            mod._ensure_libvirt_event_loop()
+            mod._ensure_libvirt_event_loop()
+            mod._ensure_libvirt_event_loop()
+
+        mock_register.assert_called_once_with()
+        mock_thread_cls.assert_called_once()
+
+    def test_connect_registers_the_event_loop_before_opening_the_connection(self, driver, monkeypatch):
+        mod = self._reset(monkeypatch)
+        calls: list[str] = []
+
+        def fake_ensure() -> None:
+            calls.append("ensure")
+
+        def fake_open(uri: str):
+            calls.append("open")
+            return MagicMock()
+
+        with patch.object(mod, "_ensure_libvirt_event_loop", side_effect=fake_ensure), \
+             patch("libvirt.open", side_effect=fake_open):
+            driver._connect()
+
+        assert calls == ["ensure", "open"]
+
+
+class TestPumpLibvirtEventsOnce:
+    def test_runs_one_event_loop_iteration(self):
+        import agent.libvirt_driver as mod
+
+        with patch.object(mod.libvirt, "virEventRunDefaultImpl") as mock_run:
+            mod._pump_libvirt_events_once()
+
+        mock_run.assert_called_once_with()
+
+    def test_exception_is_logged_and_does_not_propagate(self):
+        """A failing iteration must not kill the background pump thread."""
+        import agent.libvirt_driver as mod
+
+        with patch.object(
+            mod.libvirt, "virEventRunDefaultImpl", side_effect=RuntimeError("boom")
+        ), patch.object(mod.time, "sleep") as mock_sleep:
+            mod._pump_libvirt_events_once()  # must not raise
+
+        mock_sleep.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
 # LibvirtDriver.open_console
 # ---------------------------------------------------------------------------
 

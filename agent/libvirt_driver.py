@@ -335,6 +335,72 @@ class DomainNotRunningError(ConsoleUnavailableError):
     """The domain exists but is not currently running."""
 
 
+# ---------------------------------------------------------------------------
+# libvirt event loop (required for non-blocking stream I/O, e.g. the console)
+# ---------------------------------------------------------------------------
+#
+# A non-blocking virStream only ever gets bytes delivered into its internal
+# read buffer as a side effect of something reading the connection's RPC
+# socket - either a blocking call currently waiting on its own reply (which
+# opportunistically also drains other traffic queued on the same
+# connection), or libvirt's registered event loop. With neither running,
+# nothing ever reads the socket for an otherwise-idle non-blocking stream,
+# so stream.recv() returns -2 ("would block") forever - even once the guest
+# has actually written bytes to the pty - not because recv() isn't being
+# called often enough, but because nothing ever moved the bytes off the wire
+# into the stream's buffer for recv() to find. Calling recv() in a tighter
+# loop, or less often, makes no difference either way.
+#
+# Fix: register libvirt's default event loop implementation once per
+# process, before this process's first libvirt.open(), and keep a dedicated
+# daemon thread continuously pumping it for the process's whole life. Every
+# connection opened afterwards (including the console's own dedicated one)
+# is then automatically serviced by that same background thread.
+
+_event_loop_lock = threading.Lock()
+_event_loop_started = False
+
+
+def _pump_libvirt_events_once() -> None:
+    """Run one iteration of libvirt's default event loop; never raises.
+
+    A failing iteration is logged and does not stop the pump thread -
+    losing this thread silently would look exactly like the bug this whole
+    mechanism exists to fix (streams that quietly stop delivering data).
+    """
+    try:
+        libvirt.virEventRunDefaultImpl()
+    except Exception:
+        logger.exception("libvirt event loop iteration failed; continuing")
+        time.sleep(0.1)  # avoid a tight crash-loop if it keeps failing
+
+
+def _pump_libvirt_events_forever() -> None:
+    """Background thread body: drive libvirt's event loop for the process's life."""
+    while True:
+        _pump_libvirt_events_once()
+
+
+def _ensure_libvirt_event_loop() -> None:
+    """Register libvirt's default event loop impl and start the thread that pumps it.
+
+    Idempotent (checked-and-set under a lock) and safe to call from any
+    thread or any number of times; only the first call does anything. Must
+    run before this process's first libvirt.open() - see
+    LibvirtDriver._connect(), the sole place this is invoked from and, in
+    this file, always the first libvirt call any operation makes.
+    """
+    global _event_loop_started
+    with _event_loop_lock:
+        if _event_loop_started:
+            return
+        libvirt.virEventRegisterDefaultImpl()
+        threading.Thread(
+            target=_pump_libvirt_events_forever, name="libvirt-event-loop", daemon=True
+        ).start()
+        _event_loop_started = True
+
+
 _CONSOLE_POLL_INTERVAL = 0.02  # seconds between "would block" (-2) retries
 _CONSOLE_RECV_BYTES = 4096
 
@@ -343,9 +409,23 @@ class ConsoleSession:
     """Bridges a domain's pty console libvirt Stream to asyncio.
 
     All Stream I/O (recv/send) happens on one dedicated background thread:
-    a non-blocking virStream must be polled in a tight loop, and libvirt
-    objects are not meant to be driven concurrently from multiple threads,
-    so a single thread owns the stream/connection for its whole lifetime.
+    a non-blocking virStream must be polled, and libvirt objects are not
+    meant to be driven concurrently from multiple threads, so a single
+    thread owns the stream/connection for its whole lifetime.
+
+    Polling (rather than stream.eventAddCallback) is deliberate here, not
+    an oversight: once the module's libvirt event loop is registered and
+    running (see _ensure_libvirt_event_loop above), byte delivery into the
+    stream's internal buffer happens on that separate event-loop thread
+    regardless of who calls recv() or how often - recv() just reads
+    whatever is already buffered, or returns -2 if nothing is yet. So a
+    plain poll loop is just as correct as a callback-driven one for
+    *delivery*; a callback would only buy lower latency than
+    _CONSOLE_POLL_INTERVAL, which does not matter for a human typing into a
+    terminal, at the cost of a real callback-lifecycle/cleanup-ordering
+    hazard shared across every concurrent console session on the process's
+    one event-loop thread (the callback API does not get its own thread per
+    stream). Given that trade-off, polling was kept.
 
     Bytes read from the console are handed to *inbound_queue* (an
     asyncio.Queue) via call_soon_threadsafe, for the caller to forward to a
@@ -449,6 +529,7 @@ class LibvirtDriver:
         self._bridge = bridge
 
     def _connect(self) -> libvirt.virConnect:
+        _ensure_libvirt_event_loop()
         conn = libvirt.open(self._uri)
         if conn is None:
             raise RuntimeError(f"Failed to connect to libvirt at {self._uri}")
