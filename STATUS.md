@@ -50,6 +50,14 @@
 - libvirt_driver: KVM VM lifecycle via libvirt Python bindings
 - NIC VLAN tagging handled in libvirt_driver via OVS domain XML (nos_driver removed)
 
+### VM Console
+- Web-based serial console for running VMs, no external viewer needed
+- Flow: browser opens a WebSocket to the controller -> controller relays raw bytes to the owning agent's own /console WebSocket -> agent attaches to the VM's libvirt pty serial stream (controller never touches libvirt directly, per the hard rule)
+- Auth: portal requests a short-lived, single-use ticket via POST /api/v1/vms/{id}/console-ticket (normal JWT/X-API-Key auth + tenant ownership check), then opens the console WebSocket with that ticket as a query param, since the browser cannot attach a bearer credential to a WS handshake
+- Requires the guest to have a serial getty on the attached device (ttyS0/isa-serial) - default on Ubuntu cloud images, no extra guest config needed
+- Portal: VMConsole.tsx renders the stream with xterm.js; "Console" button on the VMs page, enabled only while the VM is running
+- Requires the agent's libvirt event loop to actually run (fixed in this session - see Recent Changes) for the console stream to deliver data at all
+
 ### Portal
 - React 19 + TypeScript + Vite + Tailwind CSS
 - Login page with JWT authentication
@@ -69,11 +77,14 @@
 - Proxies /api/ to controller :8090
 
 ### Deployment
-- scripts/cos-install.sh --role controller|agent
+- scripts/cos-install.sh --role controller|agent - fully idempotent, doubles as the update path with zero manual steps (root/OS check before git pull, tracked-file changes discarded via "git checkout -- ." before "git pull --ff-only", venv/secrets only created if missing, portal rebuilt and atomically swapped in, nginx config validated with "nginx -t" and rolled back on failure, systemd units only rewritten when changed, both services always restarted)
+- Never regenerates or overwrites secrets/credentials/user data on re-run: admin_api_key, admin_password, agent.env and node_id are all left untouched once they exist
+- scripts/cos-install.sh --role controller --backup [FILE] / --restore FILE: pg_dump + secrets + config into a single 0600 tar.gz, and restore onto a fresh controller (drops/recreates the DB, reloads the dump, restores secrets/config, re-runs migrations)
 - Controller: installs PostgreSQL, Node.js 20, nginx, builds portal, runs migrations
 - Agent: installs KVM, libvirt, openvswitch-switch, configures cos user (no longer added to nos group)
 - Adds invoking user to cos group automatically
 - Systemd services: cos-controller.service, cos-agent.service
+- See INSTALL.md for the full bare-metal-to-cluster install guide
 
 ### Database Schema (via Alembic)
 - Tables: nodes, vms, tenants, networks, vm_templates, api_keys, users, alembic_version
@@ -89,9 +100,13 @@
 - Guest OS support for cloud-init-based provisioning (qemu-guest-agent install/enable, cloud-init network-config in general) is scoped to Linux distributions with cloud-init and a Debian/RHEL-family package manager (Ubuntu, Debian, RHEL, Rocky, AlmaLinux, etc. - expected to work via cloud-init's cross-distro package module, though only Ubuntu has been actually tested end-to-end this session). Windows guests are NOT supported by any of this session's features (live IP display, static IP at creation or add-NIC) - Windows requires a different guest agent installation mechanism (not cloud-init #cloud-config, which is Linux-only) and a different provisioning tool entirely (e.g. cloudbase-init). VMTemplate.os_type is currently a free-text field not used to branch any provisioning logic, so nothing currently prevents an operator from creating a "Windows" template that would silently fail cloud-init processing. Windows support is not planned in the current phase.
 - VM seed ISOs and their .seed.json sidecar files in /var/lib/cos/seeds/ are not cleaned up when a VM is destroyed (pre-existing ISO leak, the sidecar has the same issue)
 - __pycache__/*.pyc files are tracked in git, causing noisy git status after any local test run; should be untracked and added to .gitignore
-- No automated script yet for the full nos-br + OVS internal port + netplan bootstrap from scratch (done manually on cos-node1; see scripts/migrate-mgmt-to-ovs.sh for the migration pattern) - would be a useful addition to scripts/
+- No automated script yet for the full nos-br + OVS internal port + netplan bootstrap from scratch (done manually on cos-node1; see scripts/migrate-mgmt-to-ovs.sh for the migration pattern, now documented step-by-step in INSTALL.md §4.3) - a "--role node" unified first-node installer (whiptail menu, OVS bridge with automatic rollback if connectivity is lost, controller VM creation, local agent) would still be a useful addition to scripts/
 - Controller HA (PostgreSQL replication, Keepalived VIP)
 - HTTPS/SSL for portal and API
+- The "cos" PostgreSQL role/database still uses the hardcoded password "cos" (see the TODO comment in scripts/cos-install.sh) - move to a generated secret stored under /opt/cos before this is used beyond a lab/dev network
+- No automatic scheduled database backups yet - scripts/cos-install.sh --backup is manual/on-demand only (see TODO.md)
+- No adoption of pre-existing libvirt domains by a new/rebuilt controller (a controller created via --restore or from scratch has no way to discover and adopt VMs that are already running on nodes)
+- No optional customized installer ISO (an Ubuntu 24.04 ISO preseeded with the COS repo/install script) - nodes are installed from stock Ubuntu media today (see INSTALL.md §3)
 
 ### Known Issues
 - node-1 (manually registered, no agent) shows "0s ago" heartbeat - cosmetic only
@@ -127,6 +142,38 @@
 
 ## Test Count
 - Total: TBD - run pytest from project root
+
+## Recent Changes (2026-09-28)
+
+All on branch feature/vm-console.
+
+- **Web serial console: done.** Agent opens a libvirt pty serial stream per
+  running VM over its own /console WebSocket (fixed in this session: the
+  agent wasn't running the libvirt event loop, so the stream never
+  delivered any data until a VM event fired); controller issues a
+  short-lived single-use ticket (POST /api/v1/vms/{id}/console-ticket) and
+  relays raw bytes between the browser and the agent over its own
+  WebSocket (never touches libvirt directly); portal renders it with
+  xterm.js at /vms/{id}/console, linked from a "Console" button on the VMs
+  page (enabled only while running). nginx installs a dedicated
+  websocket-upgrade.conf map and long proxy_read/send_timeout (3600s) so
+  the long-lived console session isn't cut by nginx's default ~60s
+  timeout.
+- **cos-install.sh made fully idempotent, with backup/restore added:**
+  - Re-running the script on an already-installed controller or agent is
+    now also the update path, with zero manual steps (see the Deployment
+    section above for the full list of what changed and INSTALL.md for
+    the operator-facing guide)
+  - Non-negotiable invariant: a re-run never regenerates or overwrites
+    secrets, credentials, user data, or user-edited config
+  - New: --backup [FILE] / --restore FILE for the controller role
+  - New: INSTALL.md (full bare-metal-to-cluster guide) and a rewritten,
+    de-NOS'd README.md
+  - New: tests/unit/test_cos_install_script.py - static checks (syntax,
+    regression guards against reintroducing destructive behavior, step
+    numbering consistency) plus argument-parsing/validation tests that run
+    without root (the validation for --backup/--restore/--role happens
+    before the root check)
 
 ## Recent Changes (2026-09-24)
 All on branch feature/ovs-networking (not yet merged to main).

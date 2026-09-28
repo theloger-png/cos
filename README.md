@@ -1,115 +1,47 @@
 # COS — Cloud Operating System
 
-COS is a cloud orchestrator that manages KVM virtual machines and K3s containers across multiple physical nodes. It integrates with NOS (Network Operating System) via REST API for VLAN and network configuration.
+COS is a cloud orchestrator that manages KVM virtual machines across
+multiple physical nodes. VM networking uses Open vSwitch (OVS) directly:
+VLAN tagging is applied natively via libvirt domain XML, with no external
+networking daemon or API involved.
 
-## Architecture
+## Features
 
-```
-┌──────────────────────────────────────────────┐
-│                  Controller                  │
-│  FastAPI REST API  │  Scheduler  │  DB (PG)  │
-│       ↕ NOS REST API (httpx)                 │
-└─────────────────────┬────────────────────────┘
-                      │ WebSocket (port 8091)
-          ┌───────────┼───────────┐
-          ▼           ▼           ▼
-       Agent 1     Agent 2     Agent N
-     (KVM node)  (KVM node)  (KVM node)
-```
+- Multi-node KVM VM lifecycle: create, start, stop, reboot, destroy, migrate
+- Native OVS VLAN tagging per VM NIC (no external network controller)
+- Web portal (React + Tailwind + shadcn/ui): dashboard, nodes, VMs,
+  templates, networks, tenants, hardware editor
+- Web-based serial console for running VMs, streamed over WebSocket
+- Cloud-init based provisioning: per-VM generated credentials, static IP or
+  DHCP, qemu-guest-agent for live IP reporting
+- Dual authentication: JWT (portal users) and X-API-Key (agents/scripts)
+- Multi-tenant resource scoping
+- Idempotent installer that doubles as the update path, plus backup/restore
 
-### Components
+See [INSTALL.md](INSTALL.md) for the full install guide (from a bare
+Ubuntu 24.04 node to a running cluster), including updates, backup/restore
+and troubleshooting.
+
+## Project Structure
 
 | Path | Role |
 |------|------|
-| `controller/` | Central API server, scheduler, DB, NOS integration |
-| `agent/` | Per-node daemon: libvirt management + heartbeat |
-| `common/` | Shared Pydantic models and utilities |
+| `controller/` | Central orchestrator: FastAPI REST API, scheduler, PostgreSQL |
+| `agent/` | Per-node daemon: libvirt management, OVS networking, WebSocket server |
+| `common/` | Shared Pydantic v2 models |
+| `portal/` | Web UI (React 19, Tailwind, shadcn/ui), served by nginx |
+| `scripts/` | Install/update/backup script and node-networking helpers |
+| `nginx/` | nginx config installed by `scripts/cos-install.sh` |
+| `alembic/` | Database migrations |
 | `tests/` | Unit tests |
-
-## Quick Start
-
-### 1. Install dependencies
-
-```bash
-pip install -r requirements.txt
-```
-
-### 2. Configure
-
-```bash
-cp .env.example .env
-# Edit .env with your database URL, NOS API details, etc.
-```
-
-### 3. Start the controller
-
-```bash
-# From the cos/ directory
-python -m controller.main
-```
-
-The first run creates the database tables and writes the master admin API key to `/opt/cos/admin_api_key`.
-
-### 4. Start an agent (on each physical node)
-
-```bash
-python -m agent.main
-```
-
-The agent registers itself with the controller, then starts the WebSocket command server and heartbeat loop.
-
-## API Overview
-
-All endpoints require `X-API-Key` header.
-
-| Method | Path | Description |
-|--------|------|-------------|
-| GET | `/api/v1/nodes` | List nodes |
-| POST | `/api/v1/nodes` | Register node |
-| GET | `/api/v1/vms` | List VMs (tenant-scoped) |
-| POST | `/api/v1/vms` | Create VM |
-| POST | `/api/v1/vms/{id}/start` | Start VM |
-| POST | `/api/v1/vms/{id}/stop` | Stop VM |
-| POST | `/api/v1/vms/{id}/migrate` | Migrate VM |
-| GET | `/api/v1/networks` | List networks |
-| POST | `/api/v1/networks` | Create network (configures NOS VLAN) |
-| GET | `/api/v1/tenants` | List tenants (admin) |
-| POST | `/api/v1/tenants` | Create tenant (admin) |
-| POST | `/api/v1/tenants/{id}/apikeys` | Generate API key (admin) |
-| GET | `/api/v1/templates` | List VM templates |
-
-## Scheduler
-
-Node selection uses a best-fit strategy: nodes are ranked by available RAM ratio (`free_ram / total_ram`) descending. The first node that satisfies CPU, RAM, and disk requirements is selected.
-
-## NOS Integration
-
-Network creation calls `POST /api/v1/vlans` on NOS, then `POST /api/v1/commit`. Network deletion calls `DELETE /api/v1/vlans/{vlan_id}` then commits.
 
 ## Running Tests
 
 ```bash
+pip install -r requirements.txt
 pytest tests/ -v
 ```
 
-## Configuration Reference
+## License
 
-### Controller (`COS_` prefix)
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `COS_DATABASE_URL` | `postgresql+asyncpg://cos:cos@localhost/cos` | Async PostgreSQL DSN |
-| `COS_API_HOST` | `0.0.0.0` | Listen address |
-| `COS_API_PORT` | `8090` | Listen port |
-| `COS_NOS_API_URL` | `http://127.0.0.1:8080` | NOS controller URL |
-| `COS_AGENT_HEARTBEAT_TIMEOUT_SECONDS` | `90` | Mark node offline after this many seconds |
-
-### Agent (`COS_AGENT_` prefix)
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `COS_AGENT_CONTROLLER_URL` | `http://127.0.0.1:8090` | Controller URL |
-| `COS_AGENT_WS_PORT` | `8091` | WebSocket listen port |
-| `COS_AGENT_HEARTBEAT_INTERVAL_SECONDS` | `30` | Heartbeat frequency |
-| `COS_AGENT_LIBVIRT_URI` | `qemu:///system` | libvirt connection URI |
-| `COS_AGENT_NOS_API_URL` | `http://127.0.0.1:8080` | Local NOS URL |
+TBD.
