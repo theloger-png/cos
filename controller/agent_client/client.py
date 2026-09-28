@@ -47,3 +47,12 @@ class AgentClient:
         except Exception as exc:
             logger.error("Unexpected error sending agent command '%s' to %s: %s", command, node_ip, exc)
             return AgentCommandResult(success=False, output="", error=str(exc))
+
+    def console_uri(self, node_ip: str, libvirt_uuid: str) -> str:
+        """Return the agent's raw console WebSocket URI for a domain.
+
+        Unlike send_command, the console is a long-lived binary relay, not a
+        single request/response, so it is opened directly by the caller
+        (controller/api/routers/console.py) rather than through this class.
+        """
+        return f"ws://{node_ip}:{_WS_PORT}/console?uuid={libvirt_uuid}"

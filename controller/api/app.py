@@ -5,7 +5,7 @@ from __future__ import annotations
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from controller.api.routers import nodes, vms, networks, tenants, templates
+from controller.api.routers import nodes, vms, networks, tenants, templates, console
 from controller.api.routers import auth as auth_router
 
 
@@ -27,5 +27,6 @@ def create_app() -> FastAPI:
     app.include_router(networks.router)
     app.include_router(tenants.router)
     app.include_router(templates.router)
+    app.include_router(console.router)
 
     return app
