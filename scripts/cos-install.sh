@@ -1,26 +1,91 @@
 #!/usr/bin/env bash
-set -e
-
-# ---------------------------------------------------------------------------
-# COS - Cloud Operating System installer
-# Usage: cos-install.sh --role controller|agent
-# ---------------------------------------------------------------------------
+#
+# cos-install.sh - install and update COS.
+#
+# This script is idempotent: it is safe to re-run on an already-installed
+# controller or agent machine. A re-run also doubles as the update path -
+# it pulls the latest code, reinstalls the COS package, rebuilds the portal
+# (controller) and restarts the service, without touching secrets, the
+# database, or any user-edited config.
+#
+# Usage:
+#   cos-install.sh --role controller|agent [options]
+#
+# Options common to both roles:
+#   --yes                          Assume "yes" to any confirmation prompt
+#
+# Agent-only options (for non-interactive install/update):
+#   --controller-url URL           Controller base URL, e.g. http://10.0.0.2:8090
+#   --controller-api-key KEY       Controller API key
+#   (or set COS_INSTALL_CONTROLLER_URL / COS_INSTALL_CONTROLLER_API_KEY)
+#   These are only used the first time (when /opt/cos/config/agent.env does
+#   not exist yet); on every later run the existing agent.env is left alone.
+#
+# Non-negotiable rule: a re-run NEVER regenerates or overwrites secrets,
+# credentials, user data or user-edited config.
+#
+set -euo pipefail
+set -E  # inherit the ERR trap into functions and subshells
 
 REPO_DIR=$(cd "$(dirname "$0")/.." && pwd)
+
 ROLE=""
+ASSUME_YES=0
+CONTROLLER_URL="${COS_INSTALL_CONTROLLER_URL:-}"
+CONTROLLER_API_KEY="${COS_INSTALL_CONTROLLER_API_KEY:-}"
+
+STEP_NUM=0
+STEP_TOTAL=0
+CURRENT_STEP="argument parsing"
 
 usage() {
-    echo "Usage: $0 --role controller|agent"
+    sed -n '2,26p' "$0" | sed 's/^# \{0,1\}//'
     exit 1
 }
 
-# --- Argument parsing -------------------------------------------------------
+die() {
+    echo "Error: $*" >&2
+    exit 1
+}
+
+on_err() {
+    local exit_code=$?
+    echo "" >&2
+    echo "==> FAILED at step ${STEP_NUM}/${STEP_TOTAL}: ${CURRENT_STEP} (exit code ${exit_code})" >&2
+    echo "==> See the output above for details. It is safe to fix the issue and re-run this script." >&2
+}
+trap on_err ERR
+
+step() {
+    STEP_NUM=$((STEP_NUM + 1))
+    CURRENT_STEP="$*"
+    echo ""
+    echo "[${STEP_NUM}/${STEP_TOTAL}] $*"
+}
+
+# --- Argument parsing --------------------------------------------------------
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --role)
-            ROLE="$2"
+            ROLE="${2:-}"
+            [[ -n "$ROLE" ]] || usage
             shift 2
+            ;;
+        --yes)
+            ASSUME_YES=1
+            shift
+            ;;
+        --controller-url)
+            CONTROLLER_URL="${2:-}"
+            shift 2
+            ;;
+        --controller-api-key)
+            CONTROLLER_API_KEY="${2:-}"
+            shift 2
+            ;;
+        -h|--help)
+            usage
             ;;
         *)
             usage
@@ -28,38 +93,76 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-if [[ "$ROLE" != "controller" && "$ROLE" != "agent" ]]; then
-    usage
+[[ "$ROLE" == "controller" || "$ROLE" == "agent" ]] || usage
+
+if [[ "$ROLE" == "controller" ]]; then
+    STEP_TOTAL=22
+else
+    STEP_TOTAL=18
 fi
 
-# --- Git pull (fetch latest code) -------------------------------------------
+# --- Helpers shared by multiple sections -------------------------------------
 
-echo "[0/N] Fetching latest code..."
-sudo -u "${SUDO_USER:-$USER}" git -C "$REPO_DIR" pull
+# Prints "1" if the controller answers on 127.0.0.1:8090 within ~30s, else "0".
+wait_for_controller() {
+    local i
+    for i in $(seq 1 30); do
+        if curl -fsS -o /dev/null "http://127.0.0.1:8090/openapi.json" 2>/dev/null; then
+            echo 1
+            return
+        fi
+        sleep 1
+    done
+    echo 0
+}
 
-# --- Root check -------------------------------------------------------------
+# Installs $2 (a rendered unit file) as $1 only if content differs, and
+# daemon-reloads when it changes. Always safe to call on every run.
+install_unit_if_changed() {
+    local unit_path="$1" tmp_file="$2"
+    if [[ -f "$unit_path" ]] && cmp -s "$tmp_file" "$unit_path"; then
+        echo "  Unit file unchanged: $unit_path"
+    else
+        cp "$tmp_file" "$unit_path"
+        systemctl daemon-reload
+        echo "  Unit file installed/updated: $unit_path"
+    fi
+}
 
+# ===========================================================================
+# COMMON (steps 1-9 for both roles)
+# ===========================================================================
+
+step "Checking for root privileges"
 if [[ "$(id -u)" -ne 0 ]]; then
-    echo "Error: this script must be run as root."
-    exit 1
+    die "this script must be run as root (try: sudo $0 ...)"
 fi
 
-# --- OS check ---------------------------------------------------------------
-
+step "Checking operating system"
 if ! grep -q 'Ubuntu 24.04' /etc/os-release 2>/dev/null; then
-    echo "Error: this script requires Ubuntu 24.04 LTS."
-    exit 1
+    die "this script requires Ubuntu 24.04 LTS"
 fi
 
-# ===========================================================================
-# COMMON
-# ===========================================================================
+GIT_USER="${SUDO_USER:-root}"
 
-echo "[1/N] Installing common system packages..."
+step "Updating source from git"
+if [[ -d "$REPO_DIR/.git" ]]; then
+    echo "  Discarding local changes to tracked files (e.g. stale .pyc files) as $GIT_USER..."
+    sudo -u "$GIT_USER" git -C "$REPO_DIR" checkout -- . \
+        || die "git checkout -- . failed in $REPO_DIR"
+    echo "  Pulling latest changes (fast-forward only)..."
+    if ! sudo -u "$GIT_USER" git -C "$REPO_DIR" pull --ff-only; then
+        die "git pull --ff-only failed in $REPO_DIR - resolve manually (diverged branch, local commits, or no network) and re-run"
+    fi
+else
+    echo "  $REPO_DIR is not a git checkout - skipping update, using the code on disk as-is."
+fi
+
+step "Installing common system packages"
 apt-get update -q
 apt-get install -y -q python3.12 python3.12-venv python3.12-dev git curl wget pkg-config libvirt-dev build-essential
 
-echo "[2/N] Creating cos group and user..."
+step "Creating cos group and user"
 if ! getent group cos > /dev/null 2>&1; then
     groupadd --system cos
 fi
@@ -71,62 +174,73 @@ if ! id cos > /dev/null 2>&1; then
             --shell /usr/sbin/nologin \
             cos
 fi
-
-SUDO_USER=${SUDO_USER:-$USER}
-if [ -n "$SUDO_USER" ] && [ "$SUDO_USER" != "root" ]; then
+if [[ -n "${SUDO_USER:-}" ]] && [[ "$SUDO_USER" != "root" ]]; then
     usermod -aG cos "$SUDO_USER"
 fi
 
-echo "[3/N] Creating directories..."
+step "Creating common directories"
 install -d -o cos -g cos -m 750 /opt/cos
-install -d -o cos -g cos -m 750 /opt/cos/venv
 install -d -o cos -g cos -m 750 /var/log/cos
 install -d -o cos -g cos -m 750 /run/cos
 
-echo "[4/N] Creating Python virtual environment..."
-python3.12 -m venv /opt/cos/venv
-chown -R cos:cos /opt/cos/venv
+step "Creating Python virtual environment"
+if [[ -x /opt/cos/venv/bin/python ]]; then
+    echo "  /opt/cos/venv already exists - skipping creation."
+else
+    python3.12 -m venv /opt/cos/venv
+    chown -R cos:cos /opt/cos/venv
+fi
 
-echo "[5/N] Installing COS Python package..."
-/opt/cos/venv/bin/pip install --force-reinstall "$REPO_DIR/" -q
+step "Installing the COS Python package"
+/opt/cos/venv/bin/pip install --force-reinstall --no-cache-dir --no-deps "$REPO_DIR/" -q
+
+step "Installing Python dependencies"
 /opt/cos/venv/bin/pip install -r "$REPO_DIR/requirements.txt" -q
 
 # ===========================================================================
-# CONTROLLER
+# CONTROLLER (steps 10-22)
 # ===========================================================================
 
 if [[ "$ROLE" == "controller" ]]; then
 
-    echo "[C1] Installing PostgreSQL and build dependencies..."
+    ADMIN_KEY_EXISTED=0
+    [[ -f /opt/cos/admin_api_key ]] && ADMIN_KEY_EXISTED=1
+    ADMIN_PASSWORD_EXISTED=0
+    [[ -f /opt/cos/admin_password ]] && ADMIN_PASSWORD_EXISTED=1
+
+    step "Installing PostgreSQL and build dependencies"
     apt-get install -y -q postgresql postgresql-contrib python3-dev libvirt-dev pkg-config
 
-    echo "[C2] Starting and enabling postgresql..."
+    step "Starting and enabling postgresql"
     systemctl enable postgresql
     systemctl start postgresql
 
-    echo "[C3] Setting up PostgreSQL user and database..."
-    su -c "psql -tc \"SELECT 1 FROM pg_roles WHERE rolname='cos'\" | grep -q 1 || \
-           psql -c \"CREATE USER cos WITH PASSWORD 'cos'\"" postgres
-    su -c "psql -tc \"SELECT 1 FROM pg_database WHERE datname='cos'\" | grep -q 1 || \
-           psql -c \"CREATE DATABASE cos OWNER cos\"" postgres
+    step "Setting up PostgreSQL user and database"
+    # TODO: the "cos" Postgres role uses the hardcoded password "cos". This is
+    # a known gap (tracked in COS_TODO.md) - move to a generated secret stored
+    # under /opt/cos before this is used beyond a lab/dev network.
+    sudo -u postgres psql -tc "SELECT 1 FROM pg_roles WHERE rolname='cos'" | grep -q 1 \
+        || sudo -u postgres psql -c "CREATE USER cos WITH PASSWORD 'cos'"
+    sudo -u postgres psql -tc "SELECT 1 FROM pg_database WHERE datname='cos'" | grep -q 1 \
+        || sudo -u postgres psql -c "CREATE DATABASE cos OWNER cos"
 
-    echo "[C4] Running database migrations..."
+    step "Running database migrations"
     COS_DATABASE_URL=postgresql+asyncpg://cos:cos@localhost/cos \
         /opt/cos/venv/bin/alembic --config "$REPO_DIR/alembic.ini" upgrade head
 
-    echo "[C5] Creating controller config directory..."
+    step "Creating controller config directory"
     install -d -o cos -g cos -m 750 /opt/cos/config
 
-    echo "[C6] Generating admin API key..."
+    step "Generating admin API key (if needed)"
     if [[ ! -f /opt/cos/admin_api_key ]]; then
         python3.12 -c "import secrets; print(secrets.token_hex(32))" > /opt/cos/admin_api_key
         chown cos:cos /opt/cos/admin_api_key
         chmod 640 /opt/cos/admin_api_key
     else
-        echo "       admin_api_key already exists, skipping."
+        echo "  admin_api_key already exists, leaving it untouched."
     fi
 
-    echo "[C-PORTAL] Installing Node.js 20 and nginx..."
+    step "Installing Node.js 20 and nginx"
     NODE_OK=false
     if command -v node &>/dev/null; then
         NODE_VER=$(node --version | sed 's/v//' | cut -d. -f1)
@@ -138,32 +252,64 @@ if [[ "$ROLE" == "controller" ]]; then
     fi
     apt-get install -y nginx
 
-    echo "[C-PORTAL] Building portal..."
-    SERVER_IP=$(hostname -I | awk '{print $1}')
+    step "Building the portal"
     cd "$REPO_DIR/portal"
     printf 'VITE_API_URL=\n' > .env.production
-    npm install --legacy-peer-deps
-    npm install react-is --legacy-peer-deps
+    if [[ -f package-lock.json ]]; then
+        if ! npm ci --legacy-peer-deps; then
+            echo "  npm ci failed, falling back to npm install --legacy-peer-deps"
+            npm install --legacy-peer-deps
+        fi
+    else
+        npm install --legacy-peer-deps
+    fi
     npm run build
-    rm -rf /opt/cos/portal
-    cp -r dist/ /opt/cos/portal
-    chown -R cos:cos /opt/cos/portal
+    [[ -d dist ]] || die "portal build did not produce a dist/ directory - old portal left in place"
+
+    step "Deploying the portal (safe swap)"
+    rm -rf /opt/cos/portal.new
+    cp -r dist /opt/cos/portal.new
+    chown -R cos:cos /opt/cos/portal.new
+    chmod -R 755 /opt/cos/portal.new
     chmod 755 /opt/cos
-    chmod -R 755 /opt/cos/portal
+    mv -T /opt/cos/portal.new /opt/cos/portal
+    cd "$REPO_DIR"
 
-    echo "[C-PORTAL] Installing nginx config..."
-    # map directive for WebSocket Connection-header upgrades: must live in the
-    # http{} context, so it's installed separately from the server{} block below
-    cp "$REPO_DIR/nginx/websocket-upgrade.conf" /etc/nginx/conf.d/websocket-upgrade.conf
-    cp "$REPO_DIR/nginx/cos-portal.conf" /etc/nginx/sites-available/cos-portal
-    sed -i "s|root /opt/cos/portal;|root /opt/cos/portal;|" /etc/nginx/sites-available/cos-portal
-    sed -i "s|proxy_pass http://127.0.0.1:8090;|proxy_pass http://${SERVER_IP}:8090;|" /etc/nginx/sites-available/cos-portal
-    ln -sf /etc/nginx/sites-available/cos-portal /etc/nginx/sites-enabled/cos-portal
+    step "Installing nginx configuration"
+    TS=$(date +%Y%m%d%H%M%S)
+    NGINX_CONF_DEST=/etc/nginx/conf.d/websocket-upgrade.conf
+    NGINX_SITE_DEST=/etc/nginx/sites-available/cos-portal
+    BACKUP_CONF=""
+    BACKUP_SITE=""
+    if [[ -f "$NGINX_CONF_DEST" ]]; then
+        BACKUP_CONF="${NGINX_CONF_DEST}.bak-${TS}"
+        cp -p "$NGINX_CONF_DEST" "$BACKUP_CONF"
+    fi
+    if [[ -f "$NGINX_SITE_DEST" ]]; then
+        BACKUP_SITE="${NGINX_SITE_DEST}.bak-${TS}"
+        cp -p "$NGINX_SITE_DEST" "$BACKUP_SITE"
+    fi
+    cp "$REPO_DIR/nginx/websocket-upgrade.conf" "$NGINX_CONF_DEST"
+    cp "$REPO_DIR/nginx/cos-portal.conf" "$NGINX_SITE_DEST"
+    ln -sf "$NGINX_SITE_DEST" /etc/nginx/sites-enabled/cos-portal
     rm -f /etc/nginx/sites-enabled/default
-    nginx -t && systemctl enable nginx && systemctl restart nginx
 
-    echo "[C7] Writing cos-controller systemd service..."
-    cat > /etc/systemd/system/cos-controller.service <<'EOF'
+    if ! nginx -t; then
+        echo "  nginx -t failed - restoring previous configuration, NOT reloading nginx." >&2
+        if [[ -n "$BACKUP_CONF" ]]; then cp -p "$BACKUP_CONF" "$NGINX_CONF_DEST"; else rm -f "$NGINX_CONF_DEST"; fi
+        if [[ -n "$BACKUP_SITE" ]]; then cp -p "$BACKUP_SITE" "$NGINX_SITE_DEST"; else rm -f "$NGINX_SITE_DEST"; fi
+        die "nginx configuration test failed - previous configuration restored"
+    fi
+    systemctl enable nginx >/dev/null 2>&1 || true
+    if systemctl is-active --quiet nginx; then
+        systemctl reload nginx
+    else
+        systemctl restart nginx
+    fi
+
+    step "Installing cos-controller systemd unit"
+    UNIT_TMP=$(mktemp)
+    cat > "$UNIT_TMP" <<'EOF'
 [Unit]
 Description=COS Controller
 After=network.target postgresql.service
@@ -185,88 +331,149 @@ RuntimeDirectoryMode=0750
 [Install]
 WantedBy=multi-user.target
 EOF
+    install_unit_if_changed /etc/systemd/system/cos-controller.service "$UNIT_TMP"
+    rm -f "$UNIT_TMP"
 
-    echo "[C8] Enabling and starting cos-controller..."
-    rm -f /opt/cos/admin_password
-    systemctl daemon-reload
-    systemctl enable cos-controller
+    step "Restarting cos-controller"
+    systemctl enable cos-controller >/dev/null 2>&1 || true
     systemctl restart cos-controller
-    sleep 3
+    echo "  Waiting for the controller to answer on 127.0.0.1:8090..."
+    CONTROLLER_READY=$(wait_for_controller)
+
+    step "Verifying installation"
+    OVERALL_OK=1
+
+    if systemctl is-active --quiet cos-controller; then
+        echo "  [OK] cos-controller service is active"
+    else
+        echo "  [FAIL] cos-controller service is NOT active"
+        OVERALL_OK=0
+    fi
+
+    if systemctl is-active --quiet nginx; then
+        echo "  [OK] nginx service is active"
+    else
+        echo "  [FAIL] nginx service is NOT active"
+        OVERALL_OK=0
+    fi
+
+    ALEMBIC_CURRENT=$(COS_DATABASE_URL=postgresql+asyncpg://cos:cos@localhost/cos \
+        /opt/cos/venv/bin/alembic --config "$REPO_DIR/alembic.ini" current 2>/dev/null | awk '{print $1}')
+    ALEMBIC_HEAD=$(/opt/cos/venv/bin/alembic --config "$REPO_DIR/alembic.ini" heads 2>/dev/null | awk '{print $1}')
+    if [[ -n "$ALEMBIC_CURRENT" && "$ALEMBIC_CURRENT" == "$ALEMBIC_HEAD" ]]; then
+        echo "  [OK] database schema is at head ($ALEMBIC_CURRENT)"
+    else
+        echo "  [FAIL] database schema not at head (current: ${ALEMBIC_CURRENT:-none}, head: ${ALEMBIC_HEAD:-unknown})"
+        OVERALL_OK=0
+    fi
+
+    if [[ "$CONTROLLER_READY" -eq 1 ]]; then
+        echo "  [OK] controller answered health check within 30s"
+    else
+        echo "  [FAIL] controller did not answer health check within 30s"
+        OVERALL_OK=0
+    fi
 
     echo ""
-    echo "COS Controller installed."
-    echo "  Admin API key:  $(cat /opt/cos/admin_api_key)"
-    echo "  Admin password: $(cat /opt/cos/admin_password)"
-    echo "COS Portal available at http://$(hostname -I | awk '{print $1}')"
+    if [[ "$ADMIN_PASSWORD_EXISTED" -eq 1 ]]; then
+        echo "  Admin password: unchanged (see /opt/cos/admin_password)"
+    elif [[ -f /opt/cos/admin_password ]]; then
+        echo "  Admin password: $(cat /opt/cos/admin_password)"
+    else
+        echo "  Admin password: not yet generated - check /opt/cos/admin_password shortly"
+    fi
+    if [[ "$ADMIN_KEY_EXISTED" -eq 1 ]]; then
+        echo "  Admin API key: unchanged (see /opt/cos/admin_api_key)"
+    else
+        echo "  Admin API key: $(cat /opt/cos/admin_api_key)"
+    fi
+    echo "  Portal: http://$(hostname -I | awk '{print $1}')"
+
+    if [[ "$OVERALL_OK" -eq 1 ]]; then
+        echo ""
+        echo "=== COS Controller installation: OK ==="
+    else
+        echo ""
+        echo "=== COS Controller installation: FAIL (see [FAIL] lines above) ===" >&2
+        exit 1
+    fi
 
 fi
 
 # ===========================================================================
-# AGENT
+# AGENT (steps 10-18)
 # ===========================================================================
 
 if [[ "$ROLE" == "agent" ]]; then
 
-    echo "[A-PROMPT] Collecting controller details..."
-    CONTROLLER_URL=""
-    CONTROLLER_API_KEY=""
+    AGENT_ENV_FILE=/opt/cos/config/agent.env
 
-    while [[ -z "$CONTROLLER_URL" ]]; do
-        read -p "Enter controller URL [http://CONTROLLER_IP:8090]: " CONTROLLER_URL
-        if [[ -z "$CONTROLLER_URL" ]]; then
-            echo "Error: controller URL cannot be empty."
+    step "Determining controller connection details"
+    if [[ -f "$AGENT_ENV_FILE" ]]; then
+        echo "  $AGENT_ENV_FILE already exists - keeping the existing controller URL/API key untouched."
+    else
+        if [[ -z "$CONTROLLER_URL" || -z "$CONTROLLER_API_KEY" ]]; then
+            if [[ -t 0 ]]; then
+                while [[ -z "$CONTROLLER_URL" ]]; do
+                    read -r -p "Enter controller URL [http://CONTROLLER_IP:8090]: " CONTROLLER_URL
+                    [[ -z "$CONTROLLER_URL" ]] && echo "Error: controller URL cannot be empty."
+                done
+                while [[ -z "$CONTROLLER_API_KEY" ]]; do
+                    read -rs -p "Enter controller API key: " CONTROLLER_API_KEY
+                    echo ""
+                    [[ -z "$CONTROLLER_API_KEY" ]] && echo "Error: controller API key cannot be empty."
+                done
+            else
+                die "no existing $AGENT_ENV_FILE and no --controller-url/--controller-api-key (or COS_INSTALL_CONTROLLER_URL/COS_INSTALL_CONTROLLER_API_KEY) given, and no interactive terminal available"
+            fi
         fi
-    done
+    fi
 
-    while [[ -z "$CONTROLLER_API_KEY" ]]; do
-        read -sp "Enter controller API key: " CONTROLLER_API_KEY
-        echo ""
-        if [[ -z "$CONTROLLER_API_KEY" ]]; then
-            echo "Error: controller API key cannot be empty."
-        fi
-    done
-
-    echo "[A1] Installing KVM/libvirt packages..."
+    step "Installing KVM/libvirt/OVS packages"
     apt-get install -y -q qemu-kvm libvirt-daemon-system libvirt-clients python3-libvirt cloud-image-utils openvswitch-switch
 
-    echo "[A2] Adding cos user to libvirt group..."
+    step "Adding cos to libvirt group, libvirt-qemu to cos group"
     usermod -aG libvirt cos
-
-    echo "[A2c] Adding libvirt-qemu to cos group (required to read seed ISOs and VM disks)..."
     if id libvirt-qemu > /dev/null 2>&1; then
         usermod -aG cos libvirt-qemu
     else
-        echo "       libvirt-qemu user not found - skipping (may appear after libvirtd first start)"
+        echo "  libvirt-qemu user not found - skipping (may appear after libvirtd's first start)"
     fi
 
-    echo "[A3] Creating agent directories..."
+    step "Creating agent directories"
     install -d -o cos -g cos -m 750 /opt/cos/config
-    # 755 so libvirt-qemu (uid 64055) can traverse even without cos group membership
+    # 755 so libvirt-qemu (which is not necessarily in the cos group at first
+    # install) can traverse even without cos group membership.
     install -d -o cos -g cos -m 755 /var/lib/cos
     install -d -o cos -g cos -m 755 /var/lib/cos/images
     install -d -o cos -g cos -m 755 /var/lib/cos/vms
     install -d -o cos -g cos -m 755 /var/lib/cos/seeds
 
-    echo "[A4] Generating node ID..."
+    step "Generating node ID"
     if [[ ! -f /opt/cos/node_id ]]; then
         python3.12 -c "import uuid; print(str(uuid.uuid4()))" > /opt/cos/node_id
         chown cos:cos /opt/cos/node_id
         chmod 640 /opt/cos/node_id
     else
-        echo "       node_id already exists, skipping."
+        echo "  node_id already exists, leaving it untouched."
     fi
 
-    echo "[A4b] Writing agent config..."
-    cat > /opt/cos/config/agent.env <<EOF
+    step "Writing agent configuration"
+    if [[ -f "$AGENT_ENV_FILE" ]]; then
+        echo "  $AGENT_ENV_FILE already exists - leaving it untouched."
+    else
+        cat > "$AGENT_ENV_FILE" <<EOF
 COS_AGENT_CONTROLLER_URL=${CONTROLLER_URL}
 COS_AGENT_CONTROLLER_API_KEY=${CONTROLLER_API_KEY}
 COS_AGENT_LISTEN_PORT=8091
 EOF
-    chown cos:cos /opt/cos/config/agent.env
-    chmod 640 /opt/cos/config/agent.env
+        chown cos:cos "$AGENT_ENV_FILE"
+        chmod 640 "$AGENT_ENV_FILE"
+    fi
 
-    echo "[A5] Writing cos-agent systemd service..."
-    cat > /etc/systemd/system/cos-agent.service <<'EOF'
+    step "Installing cos-agent systemd unit"
+    UNIT_TMP=$(mktemp)
+    cat > "$UNIT_TMP" <<'EOF'
 [Unit]
 Description=COS Agent
 After=network.target libvirtd.service
@@ -287,16 +494,42 @@ RuntimeDirectoryMode=0750
 [Install]
 WantedBy=multi-user.target
 EOF
+    install_unit_if_changed /etc/systemd/system/cos-agent.service "$UNIT_TMP"
+    rm -f "$UNIT_TMP"
 
-    echo "[A6] Starting cos-agent..."
-    systemctl daemon-reload
-    systemctl enable cos-agent
-    systemctl start cos-agent
+    step "Restarting cos-agent"
+    systemctl enable cos-agent >/dev/null 2>&1 || true
     systemctl restart cos-agent
+    sleep 3
+
+    step "Verifying installation"
+    OVERALL_OK=1
+
+    if systemctl is-active --quiet cos-agent; then
+        echo "  [OK] cos-agent service is active"
+    else
+        echo "  [FAIL] cos-agent service is NOT active"
+        OVERALL_OK=0
+    fi
+
+    if ss -tln 2>/dev/null | awk '{print $4}' | grep -q ':8091$'; then
+        echo "  [OK] WebSocket port 8091 is listening"
+    else
+        echo "  [FAIL] WebSocket port 8091 is not listening"
+        OVERALL_OK=0
+    fi
 
     echo ""
-    echo "COS Agent installed and started."
-    echo "  Node ID: $(cat /opt/cos/node_id)"
-    echo "  Controller URL: ${CONTROLLER_URL}"
+    echo "  Node ID: $(cat /opt/cos/node_id 2>/dev/null || echo unknown)"
+    echo "  Controller URL: $(grep -oP '(?<=COS_AGENT_CONTROLLER_URL=).*' "$AGENT_ENV_FILE" 2>/dev/null || echo unknown)"
+
+    if [[ "$OVERALL_OK" -eq 1 ]]; then
+        echo ""
+        echo "=== COS Agent installation: OK ==="
+    else
+        echo ""
+        echo "=== COS Agent installation: FAIL (see [FAIL] lines above) ===" >&2
+        exit 1
+    fi
 
 fi
