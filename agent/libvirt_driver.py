@@ -105,6 +105,9 @@ _DOMAIN_XML_TEMPLATE = """\
       <source bridge='{bridge}'/>
       <model type='virtio'/>
 {interface_vlan_block}    </interface>
+    <serial type='pty'>
+      <target type='isa-serial' port='0'/>
+    </serial>
     <console type='pty'>
       <target type='serial' port='0'/>
     </console>
@@ -691,6 +694,31 @@ class LibvirtDriver:
             })
 
         return {"vcpu": vcpu, "memory_mb": memory_mb, "disks": disks, "nics": nics}
+
+    def get_console_info(self, libvirt_uuid: str) -> bool:
+        """Check if a domain has a pty serial console.
+
+        Returns True if the domain has a <serial type='pty'> element with a
+        <target type='isa-serial'/> child, False otherwise. Includes any
+        libvirt or XML parsing errors as False.
+        """
+        conn = self._connect()
+        try:
+            domain = conn.lookupByUUIDString(libvirt_uuid)
+            xml_str = domain.XMLDesc(0)
+            root = ET.fromstring(xml_str)
+        except (libvirt.libvirtError, ET.ParseError) as exc:
+            logger.debug("Failed to parse domain XML for %s: %s", libvirt_uuid, exc)
+            return False
+        finally:
+            conn.close()
+
+        # Check for <serial type='pty'> with <target type='isa-serial'/>
+        for serial_elem in root.findall(".//serial[@type='pty']"):
+            target_elem = serial_elem.find("target")
+            if target_elem is not None and target_elem.get("type") == "isa-serial":
+                return True
+        return False
 
     # ------------------------------------------------------------------
     # Hardware editing

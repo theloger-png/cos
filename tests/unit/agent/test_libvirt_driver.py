@@ -1398,3 +1398,191 @@ class TestApplyVmConfigStaticIp:
         run.assert_not_called()
         assert len(result["nic_failures"]) == 1
         assert "attach boom" in result["nic_failures"][0]["reason"]
+
+
+# ---------------------------------------------------------------------------
+# Serial PTY console
+# ---------------------------------------------------------------------------
+
+
+class TestCreateVMSerialConsole:
+    """Serial console (pty) is required for virsh console access."""
+
+    def _captured_xml(self, driver, **kwargs) -> str:
+        domain = _mock_domain()
+        conn = _mock_conn()
+        captured: list[str] = []
+
+        def capture_define(xml: str):
+            captured.append(xml)
+            return domain
+
+        conn.defineXML.side_effect = capture_define
+
+        with patch("libvirt.open", return_value=conn), \
+             patch("os.makedirs"), \
+             patch("os.path.exists", return_value=False), \
+             patch("os.system"):
+            driver.create_vm("vm-console", 2, 2048, 20, "", **kwargs)
+
+        return captured[0]
+
+    def test_xml_has_serial_pty_element(self, driver):
+        xml = self._captured_xml(driver)
+        assert "<serial type='pty'>" in xml
+        assert "<target type='isa-serial' port='0'/>" in xml
+
+    def test_xml_has_console_pty_element(self, driver):
+        xml = self._captured_xml(driver)
+        assert "<console type='pty'>" in xml
+        assert "<target type='serial' port='0'/>" in xml
+
+    def test_serial_and_console_nested_in_devices(self, driver):
+        """Both serial and console must be inside the <devices> block."""
+        xml = self._captured_xml(driver)
+        devices_start = xml.index("<devices>")
+        devices_end = xml.index("</devices>") + len("</devices>")
+        devices_block = xml[devices_start:devices_end]
+        assert "<serial type='pty'>" in devices_block
+        assert "<console type='pty'>" in devices_block
+
+    def test_serial_comes_before_console(self, driver):
+        """Serial should be defined before console in the XML."""
+        xml = self._captured_xml(driver)
+        serial_pos = xml.index("<serial type='pty'>")
+        console_pos = xml.index("<console type='pty'>")
+        assert serial_pos < console_pos
+
+
+class TestGetConsoleInfo:
+    """Helper method to check if a domain has a pty serial console."""
+
+    def _run(self, xml: str = _SAMPLE_DOMAIN_XML) -> dict:
+        domain = _mock_domain_for_config(xml)
+        conn = MagicMock()
+        conn.lookupByUUIDString.return_value = domain
+        driver = LibvirtDriver(uri="qemu:///system", bridge="nos-br")
+
+        with patch("libvirt.open", return_value=conn):
+            return driver.get_console_info("test-uuid")
+
+    def test_returns_true_when_serial_pty_exists(self, driver):
+        """Domains created via create_vm have a serial pty console."""
+        domain = _mock_domain()
+        conn = _mock_conn()
+        captured: list[str] = []
+
+        def capture_define(xml: str):
+            captured.append(xml)
+            return domain
+
+        conn.defineXML.side_effect = capture_define
+
+        with patch("libvirt.open", return_value=conn), \
+             patch("os.makedirs"), \
+             patch("os.path.exists", return_value=False), \
+             patch("os.system"):
+            driver.create_vm("vm-test", 2, 2048, 20, "")
+
+        # Now test get_console_info on the captured XML
+        domain.XMLDesc.return_value = captured[0]
+        conn.lookupByUUIDString.return_value = domain
+        conn2 = _mock_conn()
+        conn2.lookupByUUIDString.return_value = domain
+
+        with patch("libvirt.open", return_value=conn2):
+            result = driver.get_console_info("test-uuid")
+
+        assert result is True
+
+    def test_returns_false_when_no_serial_element(self):
+        """Domain without serial element returns False."""
+        xml_no_serial = _SAMPLE_DOMAIN_XML  # sample lacks serial element
+        domain = _mock_domain_for_config(xml_no_serial)
+        conn = MagicMock()
+        conn.lookupByUUIDString.return_value = domain
+        driver = LibvirtDriver(uri="qemu:///system", bridge="nos-br")
+
+        with patch("libvirt.open", return_value=conn):
+            result = driver.get_console_info("test-uuid")
+
+        assert result is False
+
+    def test_returns_false_when_serial_type_not_pty(self):
+        """Serial element with type != 'pty' returns False."""
+        xml_file_serial = _SAMPLE_DOMAIN_XML.replace(
+            "  </devices>",
+            "    <serial type='file'>\n"
+            "      <target type='isa-serial' port='0'/>\n"
+            "    </serial>\n"
+            "  </devices>",
+        )
+        domain = _mock_domain_for_config(xml_file_serial)
+        conn = MagicMock()
+        conn.lookupByUUIDString.return_value = domain
+        driver = LibvirtDriver(uri="qemu:///system", bridge="nos-br")
+
+        with patch("libvirt.open", return_value=conn):
+            result = driver.get_console_info("test-uuid")
+
+        assert result is False
+
+    def test_returns_false_when_target_type_not_isa_serial(self):
+        """Serial with wrong target type returns False."""
+        xml_wrong_target = _SAMPLE_DOMAIN_XML.replace(
+            "  </devices>",
+            "    <serial type='pty'>\n"
+            "      <target type='usb-serial' port='0'/>\n"
+            "    </serial>\n"
+            "  </devices>",
+        )
+        domain = _mock_domain_for_config(xml_wrong_target)
+        conn = MagicMock()
+        conn.lookupByUUIDString.return_value = domain
+        driver = LibvirtDriver(uri="qemu:///system", bridge="nos-br")
+
+        with patch("libvirt.open", return_value=conn):
+            result = driver.get_console_info("test-uuid")
+
+        assert result is False
+
+    def test_returns_false_when_serial_missing_target_child(self):
+        """Serial element without target child returns False."""
+        xml_no_target = _SAMPLE_DOMAIN_XML.replace(
+            "  </devices>",
+            "    <serial type='pty'></serial>\n"
+            "  </devices>",
+        )
+        domain = _mock_domain_for_config(xml_no_target)
+        conn = MagicMock()
+        conn.lookupByUUIDString.return_value = domain
+        driver = LibvirtDriver(uri="qemu:///system", bridge="nos-br")
+
+        with patch("libvirt.open", return_value=conn):
+            result = driver.get_console_info("test-uuid")
+
+        assert result is False
+
+    def test_returns_false_on_libvirt_error(self, driver):
+        """libvirt exceptions are caught; returns False."""
+        import libvirt as _lv
+
+        conn = MagicMock()
+        conn.lookupByUUIDString.side_effect = _lv.libvirtError("domain not found")
+
+        with patch("libvirt.open", return_value=conn):
+            result = driver.get_console_info("bad-uuid")
+
+        assert result is False
+
+    def test_returns_false_on_xml_parse_error(self, driver):
+        """XML parsing errors are caught; returns False."""
+        domain = MagicMock()
+        domain.XMLDesc.return_value = "not valid xml <<>>"
+        conn = MagicMock()
+        conn.lookupByUUIDString.return_value = domain
+
+        with patch("libvirt.open", return_value=conn):
+            result = driver.get_console_info("test-uuid")
+
+        assert result is False
