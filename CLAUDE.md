@@ -54,10 +54,15 @@ Always read STATUS.md before implementing any new module.
 - All config via pydantic-settings and environment variables, never hardcoded
 
 ## Validated Milestones
-- **2026-06-15**: End-to-end VM creation via COS API with automatic NOS networking
+- **2026-06-15** (historical - used NOS networking and nos-libvirt-hook, both removed on 2026-09-24): End-to-end VM creation via COS API with automatic networking
   - Tested on cos-node1/cos-controller with tenant "admin" and ubuntu-24.04-small template
-  - Flow: POST /api/v1/vms → controller WebSocket → agent libvirt → nos-br attachment → nos-libvirt-hook triggers vnetX/VLAN provisioning → VM reaches running status with libvirt_uuid persisted
+  - Prior flow: POST /api/v1/vms → controller WebSocket → agent libvirt → nos-br attachment → nos-libvirt-hook triggers vnetX/VLAN provisioning
   - Fixed via commits 0d832f0 (admin JWT tenant context), da6713e (vm.status transitions), ac36cd3 (nos-br bridge attachment)
+- **2026-09-28**: Web serial console, idempotent installer, and backup/restore
+  - Web serial console: browser → nginx → controller WS relay → agent /console → libvirt openConsole stream, xterm.js frontend, ticket-authenticated
+  - cos-install.sh idempotent and doubles as update path: validated re-run on existing controller (secrets, portal, nginx unchanged), re-run on cos-node1 (VMs untouched)
+  - Backup/restore: validated backup + restore on separate test VM (old credentials work, hashes match, 7 VMs recovered)
+  - Fresh install on clean Ubuntu 24.04 VM with no manual steps (after greenlet fix), zero tracebacks
 
 ## Known Install Gaps
 - **cos-install.sh --role agent**: Template image files must be readable by libvirt-qemu after manual copy:
@@ -65,21 +70,24 @@ Always read STATUS.md before implementing any new module.
   - Root cause: copied files inherit the operator's umask; cos-install.sh cannot pre-create them
   - Directories (`/var/lib/cos`, `/var/lib/cos/{images,vms,seeds}`) are now set to 755 and `libvirt-qemu` is added to the `cos` group automatically by the install script
 
-## Workflow Notes (learned 2026-09-24)
+## Workflow Notes
 
-The controller and agent run from `/opt/cos/venv` (an installed Python package), not directly from the git checkout. After a `git pull`, the source tree on disk is updated but the running systemd service continues executing the old installed code until the package is reinstalled into the venv.
+**Updating any machine (2026-09-28):** Just re-run `scripts/cos-install.sh`:
+- On the controller VM: `sudo ~/cos/scripts/cos-install.sh --role controller`
+- On each agent node: `sudo ~/cos/scripts/cos-install.sh --role agent`
 
-The correct sequence after `git pull` on either `cos-node1` (agent) or the controller VM:
+The script handles git pull, package reinstall, and service restart as a single atomic operation with rollback on failure (portal and nginx). Never manually copy nginx or portal files.
 
+**Why this is necessary:** The controller and agent run from `/opt/cos/venv` (an installed Python package), not directly from the git checkout. After a `git pull`, the source tree on disk is updated but the running systemd service continues executing the old installed code until the package is reinstalled into the venv. The main symptom is new fields, parameters, or behavior appearing to have no effect even though `git log` on disk correctly shows the latest commit.
+
+**Debugging fallback (manual sequence if needed):**
 1. Reinstall the package: `sudo /opt/cos/venv/bin/pip install --force-reinstall --no-cache-dir --no-deps ~/cos/ -q`
 2. Restart the service: `sudo systemctl restart cos-agent` (on nodes) or `sudo systemctl restart cos-controller` (on controller VM)
 
-Both services require this sequence, not just one. Skipping the reinstall step silently leaves stale code running. The main symptom is new fields, parameters, or behavior appearing to have no effect even though `git log` on disk correctly shows the latest commit. This disconnect can cost significant debugging time since every other part of the chain looks correct.
-
-Note (2026-09-28): `cos-install.sh` now automates this entire process - just re-run it to update any machine. It handles git pull, package reinstall, and service restart as a single atomic operation (with rollback on failure for portal and nginx). Never manually copy nginx or portal files. Never paste `admin_password` or `admin_api_key` into chats, logs, or external services - they are stored in `/opt/cos/` on disk and fetched when needed.
+**Security:** Never paste `admin_password` or `admin_api_key` into chats, logs, or external services - they are stored securely in `/opt/cos/` on disk and fetched when needed.
 
 ## Do Not Implement Yet
 - K3s/container management
 - Billing system
 - Multi-region support
-- VXLAN tenant isolation (waiting for NOS VXLAN/EVPN)
+- VXLAN tenant isolation (decision pending: OVS static VXLAN vs Linux bridge + FRR EVPN)

@@ -70,11 +70,11 @@
 ## Deferred - Lower Priority
 
 ### Edge Router (Future)
-- [ ] Dedicated VM running NOS will serve as L3 edge/gateway for tenant VLANs
-  - Single trunk interface on nos-br carrying all tenant VLANs
-  - Per-VLAN IRBs configured manually via nos-cli inside edge VM
+- [ ] Design: dedicated router VM for tenant VLAN routing (L3 gateway)
+  - Possible implementation: NOS VM with trunk interface on nos-br, per-VLAN IRBs configured manually
   - COS Network.cidr/gateway remain informational only for now
-  - No automatic IRB provisioning until edge node/VM is set up
+  - No automatic IRB provisioning until router is set up
+  - To be designed later; NOS is one possible option, not a dependency
 
 ### AWS-Style Routing/Firewall/NAT Menu (Future)
 - [ ] Once edge router exists, add COS UI section for route tables, security groups, NAT rules (via edge NOS REST API)

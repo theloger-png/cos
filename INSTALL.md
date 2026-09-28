@@ -102,8 +102,10 @@ will host the controller VM).
 ```bash
 sudo apt-get update
 sudo apt-get install -y git openvswitch-switch
-git clone <your-cos-repo-url> ~/cos
+git clone https://github.com/theloger-png/cos.git ~/cos
 ```
+
+(If you maintain a fork of COS, use your own repository URL instead of the above.)
 
 `scripts/cos-install.sh` (run in §6/§7) installs the rest (KVM/libvirt,
 Python, etc.) itself - `openvswitch-switch` is installed here first because
@@ -178,6 +180,9 @@ cd ~/cos
     -r 4096 -c 4 -d 60
 ```
 
+(First, run `git clone https://github.com/theloger-png/cos.git ~/cos` if you
+haven't already.)
+
 This logs you in as user `super` (NOPASSWD sudo, your own
 `~/.ssh/id_ed25519.pub` key, and a randomly generated password printed at
 the end of the run). If your management port is untagged (Case A in §4.3),
@@ -206,9 +211,11 @@ seed (it does, by default) rather than copying one between VMs.
 Inside the controller VM:
 
 ```bash
-git clone <your-cos-repo-url> ~/cos
+git clone https://github.com/theloger-png/cos.git ~/cos
 sudo ~/cos/scripts/cos-install.sh --role controller
 ```
+
+(Use your own fork URL if you maintain a fork of COS.)
 
 This installs PostgreSQL, Node.js 20 and nginx, runs the database
 migrations, builds and deploys the portal, installs the nginx and systemd
@@ -239,11 +246,13 @@ On every physical node that will run VMs (prepared per §4), including the
 node hosting the controller VM if it should also run tenant VMs:
 
 ```bash
-git clone <your-cos-repo-url> ~/cos
+git clone https://github.com/theloger-png/cos.git ~/cos
 sudo ~/cos/scripts/cos-install.sh --role agent \
     --controller-url http://<controller-ip>:8090 \
     --controller-api-key <admin-api-key-from-step-6>
 ```
+
+(Use your own fork URL if you maintain a fork of COS.)
 
 (Omit the two flags to be prompted interactively instead.) This installs
 KVM/libvirt/OVS, generates a node ID, writes `/opt/cos/config/agent.env`,

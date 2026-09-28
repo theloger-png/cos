@@ -101,30 +101,25 @@
 - No adoption of pre-existing libvirt domains by a new/rebuilt controller (they keep running but are invisible until restored from a backup or adopted); there is no adoption feature yet.
 
 ### Known Issues
-- **Agent WebSocket (/ws and /console) has no authentication** (relies on network reachability); needs a shared secret before external exposure.
+- **Agent WebSocket (/ws and /console) has no authentication** - relies entirely on network reachability; needs a shared secret (or similar) before the agent port is exposed to less trusted networks.
 - Postgres password is hardcoded cos/cos.
 - No HTTPS yet (portal and API on plain HTTP).
 - apt-get install on already installed packages upgrades them (seen with libvirt on a node with running VMs); install script should check with dpkg -s first and offer an explicit --upgrade-system flag.
 - Re-exec after a git pull that changes the script itself has not been exercised on a real machine yet.
 - Console browser edge cases not yet validated: window resize, VM stopped while console is open, same console in two tabs, stopped-VM button state.
 - Portal bundle is over 1 MB (no code splitting) and npm reports audit warnings (2 moderate, 7 high).
-
-### Known Issues
-- node-1 (manually registered, no agent) shows "0s ago" heartbeat - cosmetic only
-- Portal bundle size >500KB (no code splitting yet) - performance optimization deferred
-- VITE_API_URL hardcoded at build time in .env.production - needs dynamic config for multi-env
-- **The agent's WebSocket server (port 8091, both /ws and /console) has no authentication of its own** - it relies entirely on network reachability (the agent port is expected to only be reachable from the controller's network), same trust model for the command channel and the new VM console relay alike. Needs a shared secret (or similar) between controller and agent before the agent port is reachable from anywhere less trusted than today.
+- VITE_API_URL hardcoded at build time in .env.production - needs dynamic config for multi-env.
+- node-1 (manually registered, no agent) shows "0s ago" heartbeat - cosmetic only.
 
 ## Phase 2 - Planned
 
 ### Infrastructure
 - Controller HA: PostgreSQL streaming replication, Keepalived VIP
 - HTTPS/SSL: Let's Encrypt or self-signed for internal use
-- Deploy on physical nodes, remove ESXi
 
 ### Features
 - K3s container support
-- NOS VXLAN/EVPN integration (waiting for NOS Phase 2)
+- Tenant L2 overlay (VXLAN): decision pending between OVS static VXLAN and Linux bridge + FRR EVPN (see TODO.md, Multi-POP Design)
 - Live migration tested end-to-end
 - Advanced portal features (graphs, metrics, alerts)
 - TACACS+ or LDAP integration
@@ -198,7 +193,7 @@ All on branches feature/vm-console and feature/ovs-networking (merged into main)
 - Missing greenlet on a clean venv.
 
 ## Recent Changes (2026-09-24)
-All on branch feature/ovs-networking (not yet merged to main).
+All on branch feature/ovs-networking (merged into main).
 - **NOS networking dependency fully removed**:
   - agent/libvirt_driver.py refactored: VM NICs use native OVS VLAN tagging via libvirt domain XML (<virtualport type='openvswitch'/> and <vlan><tag id='X'/></vlan>), applied automatically by libvirt + OVS at NIC attach/detach
   - Deleted agent/nos_driver.py, controller/nos_client/, and agent/nos_api_client.py (the last was orphaned dead code found and removed at the end of the session)
@@ -237,7 +232,7 @@ All on branch feature/ovs-networking (not yet merged to main).
   - Tenants create form was missing the required "email" field (form and type updated)
   - Templates create form was missing required "os_type" and "image_path" fields (form and type updated)
   - VM Credentials modal copy buttons did nothing over plain HTTP (Clipboard API fails silently in non-secure contexts); fixed with a secure-context check, an execCommand('copy') fallback, error logging, and visual copy-success feedback
-- **Operational note** (documented in CLAUDE.md): controller and agent run from an installed package in /opt/cos/venv, so git pull alone does not update running code; every deploy needs pip install --force-reinstall --no-cache-dir --no-deps into the venv followed by a service restart, for both controller and agent
+- **Updating is done by re-running scripts/cos-install.sh** (see Recent Changes 2026-09-28): git pull, package reinstall, and service restart are now automated. The manual sequence (pip install --force-reinstall --no-cache-dir --no-deps + systemctl restart) is a debugging fallback only.
 
 ## Recent Changes (2026-06-15)
 - **Validated milestone** (late afternoon): Cloud-init credentials and VM hardware editing features (13 commits, 216 tests)
