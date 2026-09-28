@@ -152,6 +152,9 @@ if [[ "$ROLE" == "controller" ]]; then
     chmod -R 755 /opt/cos/portal
 
     echo "[C-PORTAL] Installing nginx config..."
+    # map directive for WebSocket Connection-header upgrades: must live in the
+    # http{} context, so it's installed separately from the server{} block below
+    cp "$REPO_DIR/nginx/websocket-upgrade.conf" /etc/nginx/conf.d/websocket-upgrade.conf
     cp "$REPO_DIR/nginx/cos-portal.conf" /etc/nginx/sites-available/cos-portal
     sed -i "s|root /opt/cos/portal;|root /opt/cos/portal;|" /etc/nginx/sites-available/cos-portal
     sed -i "s|proxy_pass http://127.0.0.1:8090;|proxy_pass http://${SERVER_IP}:8090;|" /etc/nginx/sites-available/cos-portal
