@@ -8,6 +8,7 @@ import { NodeDetail } from '@/pages/NodeDetail'
 import { VMs } from '@/pages/VMs'
 import { VMCreate } from '@/pages/VMCreate'
 import { VMHardware } from '@/pages/VMHardware'
+import { VMConsole } from '@/pages/VMConsole'
 import { Templates } from '@/pages/Templates'
 import { Networks } from '@/pages/Networks'
 import { Tenants } from '@/pages/Tenants'
@@ -48,6 +49,7 @@ function App() {
             <Route path="/vms" element={<VMs />} />
             <Route path="/vms/create" element={<VMCreate />} />
             <Route path="/vms/:id/hardware" element={<VMHardware />} />
+            <Route path="/vms/:id/console" element={<VMConsole />} />
             <Route path="/templates" element={<Templates />} />
             <Route path="/networks" element={<Networks />} />
             <Route path="/tenants" element={<Tenants />} />

@@ -1,4 +1,11 @@
-import type { VM, VMCreateRequest, VMCreateResponse, VMHardwareConfig, VMHardwareChanges } from '@/types'
+import type {
+  VM,
+  VMCreateRequest,
+  VMCreateResponse,
+  VMHardwareConfig,
+  VMHardwareChanges,
+  ConsoleTicketResponse,
+} from '@/types'
 import client from './client'
 
 export async function getVMs(): Promise<VM[]> {
@@ -42,5 +49,17 @@ export async function getVMHardware(id: string): Promise<VMHardwareConfig> {
 
 export async function applyVMHardware(id: string, changes: VMHardwareChanges): Promise<VMHardwareConfig> {
   const { data } = await client.put<VMHardwareConfig>(`/api/v1/vms/${id}/hardware`, changes)
+  return data
+}
+
+/**
+ * Request a one-time, 30-second console ticket for a running VM. The
+ * WebSocket URL itself is built separately (see VMConsole.tsx) from
+ * window.location, not from this client's baseURL - the console connects
+ * through nginx's same-origin /api/ WebSocket proxy, not directly at the
+ * controller.
+ */
+export async function getConsoleTicket(id: string): Promise<ConsoleTicketResponse> {
+  const { data } = await client.post<ConsoleTicketResponse>(`/api/v1/vms/${id}/console-ticket`)
   return data
 }

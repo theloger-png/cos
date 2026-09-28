@@ -152,3 +152,8 @@ export interface VMHardwareChanges {
   add_nics: { network_id: string; ip_cidr?: string; gateway?: string }[]
   remove_nics: { target: string }[]
 }
+
+export interface ConsoleTicketResponse {
+  ticket: string
+  expires_in: number
+}
