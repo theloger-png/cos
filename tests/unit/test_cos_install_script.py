@@ -24,6 +24,7 @@ from pathlib import Path
 import pytest
 
 SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "cos-install.sh"
+REQUIREMENTS = Path(__file__).resolve().parents[2] / "requirements.txt"
 
 
 def _run(args: list[str], timeout: float = 10) -> subprocess.CompletedProcess[str]:
@@ -83,6 +84,61 @@ def test_pip_install_is_force_reinstall_no_deps(script_text: str) -> None:
     assert "--no-cache-dir" in script_text
     assert "--no-deps" in script_text
     assert "pip install -r" in script_text, "dependencies must be installed separately from the COS package"
+
+
+def test_requirements_installed_before_alembic_and_without_no_deps(script_text: str) -> None:
+    """Regression guard: requirements.txt (which carries greenlet via the
+    sqlalchemy[asyncio] extra) must be installed, without --no-deps, before
+    any "alembic upgrade head" call - otherwise alembic fails on a clean venv.
+
+    do_backup()/do_restore() are *defined* early in the file (their bodies
+    contain "alembic upgrade head" for the post-restore migration) but are
+    only *called* later, after the dependency install runs - so this checks
+    call/execution sites, not raw text position of the function bodies.
+    """
+    deps_idx = script_text.index("pip install -r")
+    deps_line = script_text.splitlines()[script_text.count("\n", 0, deps_idx)]
+    assert "--no-deps" not in deps_line
+
+    # Controller install path: runs directly after COMMON, i.e. after deps_idx.
+    controller_alembic_idx = script_text.index(
+        "alembic", script_text.index('step "Running database migrations"')
+    )
+    assert deps_idx < controller_alembic_idx
+
+    # do_restore() is only invoked (both for --restore and post-install) from
+    # call sites below COMMON; its definition (with its own alembic call)
+    # sits above COMMON but never executes until called.
+    restore_call_sites = [m.start() for m in re.finditer(r"^\s*do_restore$", script_text, re.MULTILINE)]
+    assert restore_call_sites, "do_restore() must actually be called somewhere"
+    for call_idx in restore_call_sites:
+        assert deps_idx < call_idx
+
+
+def test_requirements_pins_sqlalchemy_asyncio_extra() -> None:
+    """Regression guard: plain sqlalchemy>=2.0 does not pull in greenlet, so
+    "alembic upgrade head" fails on a clean venv with "SQLAlchemy asyncio
+    module requires greenlet". The [asyncio] extra must be kept.
+    """
+    text = REQUIREMENTS.read_text()
+    assert "sqlalchemy[asyncio]" in text
+    assert re.search(r"^sqlalchemy>=", text, re.MULTILINE) is None
+
+
+def test_requirements_has_no_test_only_packages() -> None:
+    """pytest/pytest-asyncio belong in requirements-dev.txt, not in the
+    production requirements installed on every controller/agent machine.
+    """
+    text = REQUIREMENTS.read_text()
+    assert "pytest" not in text
+
+
+def test_requirements_dev_extends_requirements() -> None:
+    dev_requirements = REQUIREMENTS.with_name("requirements-dev.txt")
+    text = dev_requirements.read_text()
+    assert "-r requirements.txt" in text
+    assert "pytest" in text
+    assert "pytest-asyncio" in text
 
 
 def test_portal_uses_safe_atomic_swap(script_text: str) -> None:
