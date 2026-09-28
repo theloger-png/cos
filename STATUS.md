@@ -140,8 +140,7 @@
 - Open vSwitch for VM networking: native VLAN tagging via libvirt domain XML (replaced NOS REST API, 2026-09-24)
 
 ## Test Count
-- Total: 309 passed (2026-09-28) - run `pytest tests/unit` from project root
-- Note: test_migration_cloud_init.py fails to collect (alembic install issue in this sandbox; passes on real machines)
+- 309 passed in the development sandbox (2026-09-28); 313 test functions exist in tests/unit, the difference is test_migration_cloud_init.py which does not collect in the sandbox. Run pytest tests/unit on a machine with the full requirements-dev.txt to get the authoritative number.
 
 ## Recent Changes
 
