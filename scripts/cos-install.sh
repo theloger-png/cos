@@ -295,12 +295,29 @@ GIT_USER="${SUDO_USER:-root}"
 
 step "Updating source from git"
 if [[ -d "$REPO_DIR/.git" ]]; then
-    echo "  Discarding local changes to tracked files (e.g. stale .pyc files) as $GIT_USER..."
-    sudo -u "$GIT_USER" git -C "$REPO_DIR" checkout -- . \
-        || die "git checkout -- . failed in $REPO_DIR"
-    echo "  Pulling latest changes (fast-forward only)..."
-    if ! sudo -u "$GIT_USER" git -C "$REPO_DIR" pull --ff-only; then
-        die "git pull --ff-only failed in $REPO_DIR - resolve manually (diverged branch, local commits, or no network) and re-run"
+    if [[ "${COS_INSTALL_REEXEC:-0}" -eq 1 ]]; then
+        echo "  Already re-executed after a git update in this run - skipping a second pull."
+    else
+        echo "  Discarding local changes to tracked files (e.g. stale .pyc files) as $GIT_USER..."
+        sudo -u "$GIT_USER" git -C "$REPO_DIR" checkout -- . \
+            || die "git checkout -- . failed in $REPO_DIR"
+        BEFORE_SHA=$(sudo -u "$GIT_USER" git -C "$REPO_DIR" rev-parse HEAD)
+        echo "  Pulling latest changes (fast-forward only)..."
+        if ! sudo -u "$GIT_USER" git -C "$REPO_DIR" pull --ff-only; then
+            die "git pull --ff-only failed in $REPO_DIR - resolve manually (diverged branch, local commits, or no network) and re-run"
+        fi
+        AFTER_SHA=$(sudo -u "$GIT_USER" git -C "$REPO_DIR" rev-parse HEAD)
+        if [[ "$BEFORE_SHA" != "$AFTER_SHA" ]]; then
+            # bash reads this very file incrementally as it executes it; if the
+            # pull just changed it on disk, continuing would run an undefined
+            # mix of old and new code. Re-exec the (now-updated) script once,
+            # guarded by COS_INSTALL_REEXEC so it cannot loop. Root/OS checks
+            # and argument parsing simply run again on the new process, which
+            # is harmless.
+            echo "  Source updated ($BEFORE_SHA -> $AFTER_SHA) - re-executing the updated script..."
+            export COS_INSTALL_REEXEC=1
+            exec "$0" "$@"
+        fi
     fi
 else
     echo "  $REPO_DIR is not a git checkout - skipping update, using the code on disk as-is."
@@ -415,12 +432,26 @@ if [[ "$ROLE" == "controller" ]]; then
     [[ -d dist ]] || die "portal build did not produce a dist/ directory - old portal left in place"
 
     step "Deploying the portal (safe swap)"
+    # rename() cannot replace a non-empty directory, so a plain "mv" of the new
+    # build over an existing portal/ fails on a re-run. Swap via a .old
+    # side-step instead, restoring it if the final move fails for any reason.
     rm -rf /opt/cos/portal.new
     cp -r dist /opt/cos/portal.new
     chown -R cos:cos /opt/cos/portal.new
     chmod -R 755 /opt/cos/portal.new
     chmod 755 /opt/cos
-    mv -T /opt/cos/portal.new /opt/cos/portal
+    if [[ -d /opt/cos/portal ]]; then
+        rm -rf /opt/cos/portal.old
+        mv /opt/cos/portal /opt/cos/portal.old
+    fi
+    if mv /opt/cos/portal.new /opt/cos/portal; then
+        rm -rf /opt/cos/portal.old
+    else
+        if [[ -d /opt/cos/portal.old ]]; then
+            mv /opt/cos/portal.old /opt/cos/portal
+        fi
+        die "failed to move the new portal build into place at /opt/cos/portal - previous portal has been restored (if it existed)"
+    fi
     cd "$REPO_DIR"
 
     step "Installing nginx configuration"

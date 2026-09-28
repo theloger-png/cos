@@ -86,8 +86,33 @@ def test_pip_install_is_force_reinstall_no_deps(script_text: str) -> None:
 
 
 def test_portal_uses_safe_atomic_swap(script_text: str) -> None:
+    """Regression guard: rename() cannot replace a non-empty directory, so
+    "mv -T new portal" fails on a re-run once portal/ already exists. The
+    swap must go through a .old side-step (with rollback) instead.
+    """
     assert "/opt/cos/portal.new" in script_text
-    assert "mv -T /opt/cos/portal.new /opt/cos/portal" in script_text
+    assert "mv -T" not in script_text
+    assert "/opt/cos/portal.old" in script_text
+    assert "mv /opt/cos/portal /opt/cos/portal.old" in script_text
+    assert 'mv /opt/cos/portal.new /opt/cos/portal' in script_text
+
+
+def test_portal_swap_rolls_back_on_failed_final_move(script_text: str) -> None:
+    swap_start = script_text.index('step "Deploying the portal (safe swap)"')
+    swap_end = script_text.index('step "Installing nginx configuration"')
+    swap_region = script_text[swap_start:swap_end]
+    assert "if mv /opt/cos/portal.new /opt/cos/portal; then" in swap_region
+    assert 'mv /opt/cos/portal.old /opt/cos/portal' in swap_region
+    assert "die " in swap_region
+
+
+def test_reexec_guard_present(script_text: str) -> None:
+    """Regression guard: the script re-execs itself once after an in-place
+    git update (since bash reads the running script incrementally), guarded
+    by an env var so it cannot loop.
+    """
+    assert "COS_INSTALL_REEXEC" in script_text
+    assert 'exec "$0" "$@"' in script_text
 
 
 def test_nginx_config_validated_before_reload(script_text: str) -> None:
