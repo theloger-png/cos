@@ -35,6 +35,7 @@ and troubleshooting.
 | `nginx/` | nginx config installed by `scripts/cos-install.sh` |
 | `alembic/` | Database migrations |
 | `tests/` | Unit tests |
+| `CHANGELOG.md` | Historical record of changes |
 
 ## Running Tests
 

@@ -7,7 +7,11 @@ networking: VLAN tagging is applied natively via libvirt domain XML
 (virtualport type='openvswitch' + vlan tag), with no external networking
 daemon or API involved.
 
-Always read STATUS.md before implementing any new module.
+Always read STATUS.md before implementing any new module. Read STATUS.md for
+current state and INSTALL.md for install, update, backup/restore procedures
+before touching scripts/cos-install.sh. Any change to cos-install.sh must keep
+it idempotent: never regenerate or overwrite secrets, agent.env, node_id or
+user data on a re-run; and re-validate the re-run path on a real machine.
 
 ## Components
 - controller/ - Central orchestrator (FastAPI, PostgreSQL)
