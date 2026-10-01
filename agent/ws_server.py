@@ -72,6 +72,11 @@ async def _dispatch(command: AgentCommand) -> AgentCommandResult:
             _libvirt.set_user_password(p["libvirt_uuid"], p["user"], p["password_hash"])
             return AgentCommandResult(success=True, output="password reset")
 
+        elif cmd == "vm_set_password_offline":
+            # Offline reset: VM must be stopped. Raises PasswordResetError on failure.
+            _libvirt.set_user_password_offline(p["libvirt_uuid"], p["user"], p["password_hash"])
+            return AgentCommandResult(success=True, output="password reset (offline)")
+
         elif cmd == "vm_destroy":
             ok = _libvirt.destroy_vm(p["libvirt_uuid"])
             return AgentCommandResult(success=ok, output="destroyed" if ok else "", error=None if ok else "destroy failed")

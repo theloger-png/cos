@@ -85,15 +85,25 @@ export function VMs() {
       }
     }
     if (type === 'reset-password') {
+      const isRunning = vm.status === 'running'
       return {
         title: `Reset password for ${vm.name}?`,
         description: (
           <>
             <p>
-              A new random password is generated for the VM&apos;s default user and applied
-              immediately through the guest agent. The current password stops working. No reboot is needed.
+              A new random password is generated for the VM&apos;s default user.
+              {isRunning ? (
+                <>
+                  {' '}Applied immediately through the guest agent. No reboot is needed.
+                  Requires qemu-guest-agent running inside the VM.
+                </>
+              ) : (
+                <>
+                  {' '}The VM will be stopped while we edit its password file directly,
+                  then powered back on. No guest agent is needed.
+                </>
+              )}
             </p>
-            <p>The VM must be running with qemu-guest-agent active.</p>
           </>
         ),
         confirmLabel: 'Reset password',

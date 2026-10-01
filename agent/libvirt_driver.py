@@ -795,6 +795,84 @@ class LibvirtDriver:
         finally:
             conn.close()
 
+    def set_user_password_offline(self, libvirt_uuid: str, user: str, password_hash: str) -> None:
+        """Set a guest user's password offline via libguestfs when VM is stopped.
+
+        *password_hash* must be a crypt(3) hash (e.g. ``$6$...``). Calls the
+        helper script cos-pw-reset-helper which edits /etc/shadow directly on
+        the stopped VM's disk. Updates both password hash and lastchg field.
+        After successful reset, also updates the hash in the .seed.json sidecar
+        so a future NIC-add operation doesn't revert it.
+
+        Raises PasswordResetError on any failure.
+        """
+        conn = self._connect()
+        try:
+            try:
+                domain = conn.lookupByUUIDString(libvirt_uuid)
+            except libvirt.libvirtError as exc:
+                if exc.get_error_code() == libvirt.VIR_ERR_NO_DOMAIN:
+                    raise PasswordResetError("VM not found on this node") from exc
+                raise PasswordResetError(f"Could not look up the VM: {_scrub(exc, password_hash)}") from exc
+
+            state, _reason = domain.state()
+            if state != libvirt.VIR_DOMAIN_SHUTOFF:
+                raise PasswordResetError("VM must be stopped for offline password reset")
+
+            # Get disk path from domain XML
+            xml = domain.XMLDesc()
+            root = ET.fromstring(xml)
+            disk_elem = root.find(".//disk[@device='disk']/source")
+            if disk_elem is None:
+                raise PasswordResetError("Could not find VM disk in domain XML")
+
+            disk_path = disk_elem.get("file")
+            if not disk_path or not os.path.exists(disk_path):
+                raise PasswordResetError("VM disk not found or inaccessible")
+
+            # Call helper script with hash on stdin
+            try:
+                result = subprocess.run(
+                    ["/usr/local/bin/cos-pw-reset-helper", disk_path, user],
+                    input=password_hash,
+                    capture_output=True,
+                    text=True,
+                    timeout=300,
+                )
+            except FileNotFoundError:
+                raise PasswordResetError(
+                    "Password reset helper not installed (cos-pw-reset-helper not found)"
+                ) from None
+            except subprocess.TimeoutExpired:
+                raise PasswordResetError("Password reset helper timed out (>5 min)") from None
+
+            if result.returncode == 2:
+                raise PasswordResetError(f"User '{user}' not found in the VM")
+            if result.returncode == 3:
+                raise PasswordResetError("Password hash validation failed in helper")
+            if result.returncode != 0:
+                # Helper already logged the error to stderr; be generic for user
+                raise PasswordResetError("Offline password reset failed (helper returned error)")
+
+            logger.info("Reset password offline for user %r on VM %s", user, libvirt_uuid)
+
+            # Update the .seed.json sidecar if it exists (so future NICs don't revert this)
+            seed_json_path = os.path.join(_SEED_BASE_DIR, f"{libvirt_uuid}.seed.json")
+            if os.path.exists(seed_json_path):
+                try:
+                    with open(seed_json_path, "r") as f:
+                        seed_data = json.load(f)
+                    # Update the password hash in the sidecar
+                    seed_data["cloud_init_password_hash"] = password_hash
+                    with open(seed_json_path, "w") as f:
+                        json.dump(seed_data, f)
+                    logger.info("Updated .seed.json sidecar for VM %s", libvirt_uuid)
+                except Exception as exc:
+                    logger.warning("Failed to update .seed.json for VM %s: %s", libvirt_uuid, exc)
+                    # Non-fatal; the password reset itself succeeded
+        finally:
+            conn.close()
+
     def destroy_vm(self, libvirt_uuid: str) -> bool:
         """Force-stop, undefine, and delete the disk of a domain."""
         conn = self._connect()

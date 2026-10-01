@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import subprocess
 import uuid
 import xml.etree.ElementTree as ET
 from unittest.mock import MagicMock, patch, call
@@ -2004,3 +2005,95 @@ class TestSetUserPassword:
         with caplog.at_level("DEBUG"):
             self._call(conn)
         assert _PW_HASH not in caplog.text
+
+
+class TestSetUserPasswordOffline:
+    def _setup(self, state: int = _lv_pw.VIR_DOMAIN_SHUTOFF, xml_error: Exception | None = None):
+        domain = MagicMock()
+        domain.state.return_value = (state, 0)
+        domain.XMLDesc.side_effect = xml_error
+        disk_elem = MagicMock()
+        disk_elem.get.return_value = "/var/lib/cos/vms/test-uuid.qcow2"
+        if xml_error is None:
+            # Mock the domain XML to include a disk element
+            domain.XMLDesc.return_value = (
+                '<domain><devices>'
+                '<disk device="disk"><source file="/var/lib/cos/vms/test-uuid.qcow2"/></disk>'
+                '</devices></domain>'
+            )
+        conn = MagicMock()
+        conn.lookupByUUIDString.return_value = domain
+        return conn, domain
+
+    def _call(self, conn, helper_returncode: int = 0, helper_output: str = ""):
+        driver = LibvirtDriver(uri="qemu:///system", bridge="nos-br")
+        with patch("libvirt.open", return_value=conn):
+            with patch("subprocess.run") as run_mock:
+                result = MagicMock()
+                result.returncode = helper_returncode
+                result.stdout = helper_output
+                result.stderr = "password reset successful for user 'ubuntu'\n"
+                run_mock.return_value = result
+                driver.set_user_password_offline("abc-123", "ubuntu", _PW_HASH)
+
+    def test_running_vm_is_rejected(self):
+        conn, _ = self._setup(state=_lv_pw.VIR_DOMAIN_RUNNING)
+        with pytest.raises(PasswordResetError, match="must be stopped"):
+            self._call(conn)
+
+    def test_helper_invoked_with_disk_path_and_user(self):
+        conn, _ = self._setup()
+        with patch("libvirt.open", return_value=conn):
+            with patch("subprocess.run") as run_mock:
+                result = MagicMock()
+                result.returncode = 0
+                result.stderr = ""
+                run_mock.return_value = result
+                with patch("os.path.exists", return_value=True):
+                    driver = LibvirtDriver(uri="qemu:///system", bridge="nos-br")
+                    driver.set_user_password_offline("abc-123", "ubuntu", _PW_HASH)
+                run_mock.assert_called_once()
+                args, kwargs = run_mock.call_args
+                assert args[0][0] == "/usr/local/bin/cos-pw-reset-helper"
+                assert args[0][1] == "/var/lib/cos/vms/test-uuid.qcow2"
+                assert args[0][2] == "ubuntu"
+                assert kwargs["input"] == _PW_HASH
+
+    def test_user_not_found_error_code_2(self):
+        conn, _ = self._setup()
+        with patch("libvirt.open", return_value=conn):
+            with patch("subprocess.run") as run_mock:
+                result = MagicMock()
+                result.returncode = 2
+                result.stderr = "user 'baduser' not found\n"
+                run_mock.return_value = result
+                with patch("os.path.exists", return_value=True):
+                    driver = LibvirtDriver(uri="qemu:///system", bridge="nos-br")
+                    with pytest.raises(PasswordResetError, match="not found"):
+                        driver.set_user_password_offline("abc-123", "baduser", _PW_HASH)
+
+    def test_helper_not_found(self):
+        conn, _ = self._setup()
+        with patch("libvirt.open", return_value=conn):
+            with patch("subprocess.run", side_effect=FileNotFoundError("helper not found")):
+                with patch("os.path.exists", return_value=True):
+                    driver = LibvirtDriver(uri="qemu:///system", bridge="nos-br")
+                    with pytest.raises(PasswordResetError, match="helper not installed"):
+                        driver.set_user_password_offline("abc-123", "ubuntu", _PW_HASH)
+
+    def test_helper_timeout(self):
+        conn, _ = self._setup()
+        with patch("libvirt.open", return_value=conn):
+            with patch("subprocess.run", side_effect=subprocess.TimeoutExpired("cmd", 300)):
+                with patch("os.path.exists", return_value=True):
+                    driver = LibvirtDriver(uri="qemu:///system", bridge="nos-br")
+                    with pytest.raises(PasswordResetError, match="timed out"):
+                        driver.set_user_password_offline("abc-123", "ubuntu", _PW_HASH)
+
+    def test_vm_not_found(self):
+        conn = MagicMock()
+        conn.lookupByUUIDString.side_effect = _CodedLibvirtError("no domain", _lv_pw.VIR_ERR_NO_DOMAIN)
+        driver = LibvirtDriver(uri="qemu:///system", bridge="nos-br")
+        with patch("libvirt.open", return_value=conn):
+            with pytest.raises(PasswordResetError, match="VM not found"):
+                driver.set_user_password_offline("no-such-uuid", "ubuntu", _PW_HASH)

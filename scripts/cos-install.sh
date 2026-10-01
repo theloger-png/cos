@@ -617,7 +617,7 @@ if [[ "$ROLE" == "agent" ]]; then
     fi
 
     step "Installing KVM/libvirt/OVS packages"
-    apt-get install -y -q qemu-kvm libvirt-daemon-system libvirt-clients python3-libvirt cloud-image-utils openvswitch-switch
+    apt-get install -y -q qemu-kvm libvirt-daemon-system libvirt-clients python3-libvirt cloud-image-utils openvswitch-switch libguestfs-tools python3-guestfs build-essential
 
     step "Adding cos to libvirt group, libvirt-qemu to cos group"
     usermod -aG libvirt cos
@@ -635,6 +635,31 @@ if [[ "$ROLE" == "agent" ]]; then
     install -d -o cos -g cos -m 755 /var/lib/cos/images
     install -d -o cos -g cos -m 755 /var/lib/cos/vms
     install -d -o cos -g cos -m 755 /var/lib/cos/seeds
+
+    step "Building libguestfs appliance for offline password reset"
+    LIBGUESTFS_BACKEND=direct supermin --build --size 1G -f ext2 -o /var/lib/cos/guestfs-appliance > /dev/null 2>&1 || \
+        echo "  warning: supermin build failed or not available; offline password reset may not work"
+    if [[ -d /var/lib/cos/guestfs-appliance ]]; then
+        touch /var/lib/cos/guestfs-appliance/README.fixed
+        chmod -R a+rX /var/lib/cos/guestfs-appliance
+        echo "  libguestfs appliance ready"
+    else
+        echo "  warning: libguestfs appliance directory not created"
+    fi
+
+    step "Adding cos to kvm group for libguestfs KVM acceleration"
+    usermod -aG kvm cos || echo "  warning: failed to add cos to kvm group"
+
+    step "Compiling password reset helper"
+    HELPER_C="$REPO_DIR/scripts/cos-pw-reset-helper.c"
+    HELPER_BIN="/usr/local/bin/cos-pw-reset-helper"
+    if [[ ! -f "$HELPER_C" ]]; then
+        die "password reset helper source not found at $HELPER_C"
+    fi
+    gcc -O2 -Wall -o "$HELPER_BIN" "$HELPER_C" $(pkg-config --cflags --libs guestfs) || \
+        die "failed to compile password reset helper"
+    chmod 755 "$HELPER_BIN"
+    echo "  helper compiled and installed at $HELPER_BIN"
 
     step "Generating node ID"
     if [[ ! -f /opt/cos/node_id ]]; then

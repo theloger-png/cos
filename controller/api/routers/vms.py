@@ -353,12 +353,20 @@ async def reset_vm_password(
     session: AsyncSession = Depends(db_session),
     auth: tuple[APIKey | None, Tenant | None] = Depends(current_auth),
 ) -> VMPasswordResetResponse:
-    """Reset a guest user's password live through the qemu guest agent.
+    """Reset a guest user's password.
 
     Generates a new random password, sends only its hash to the agent, and
     returns the plaintext once in the response (it is never stored or logged).
-    The VM must be running with qemu-guest-agent active. The user defaults to
-    the template's cloud_init_user (or "ubuntu" for VMs without a template).
+
+    If the VM is running, attempts live reset through the qemu guest agent
+    (requires qemu-guest-agent active inside the VM).
+
+    If the VM is stopped, attempts offline reset via libguestfs (edits /etc/shadow
+    directly on the stopped VM's disk; no reboot needed but requires the helper
+    script and libguestfs libraries on the node).
+
+    The user defaults to the template's cloud_init_user (or "ubuntu" for VMs
+    without a template).
     """
     _, tenant = auth
     vm = await _get_vm_or_404(session, vm_id)
@@ -378,15 +386,32 @@ async def reset_vm_password(
 
     node = await _get_node_or_404(session, vm.node_id)
     plaintext_password = generate_password()
-    result = await AgentClient().send_command(
+    password_hash = hash_password(plaintext_password)
+
+    # Try live reset first (VM must be running with guest agent)
+    agent = AgentClient()
+    result = await agent.send_command(
         node.ip_address,
         "vm_set_password",
         {
             "libvirt_uuid": vm.libvirt_uuid,
             "user": user,
-            "password_hash": hash_password(plaintext_password),
+            "password_hash": password_hash,
         },
     )
+
+    # If live fails with "not running", try offline
+    if not result.success and "not running" in (result.error or "").lower():
+        result = await agent.send_command(
+            node.ip_address,
+            "vm_set_password_offline",
+            {
+                "libvirt_uuid": vm.libvirt_uuid,
+                "user": user,
+                "password_hash": password_hash,
+            },
+        )
+
     if not result.success:
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
