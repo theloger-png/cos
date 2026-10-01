@@ -617,7 +617,7 @@ if [[ "$ROLE" == "agent" ]]; then
     fi
 
     step "Installing KVM/libvirt/OVS packages"
-    apt-get install -y -q qemu-kvm libvirt-daemon-system libvirt-clients python3-libvirt cloud-image-utils openvswitch-switch libguestfs-tools python3-guestfs build-essential
+    apt-get install -y -q qemu-kvm libvirt-daemon-system libvirt-clients python3-libvirt cloud-image-utils openvswitch-switch libguestfs-tools python3-guestfs libguestfs-dev supermin build-essential pkg-config
 
     step "Adding cos to libvirt group, libvirt-qemu to cos group"
     usermod -aG libvirt cos
