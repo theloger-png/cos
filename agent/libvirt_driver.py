@@ -335,6 +335,10 @@ class DomainNotRunningError(ConsoleUnavailableError):
     """The domain exists but is not currently running."""
 
 
+class PasswordResetError(Exception):
+    """A guest user password could not be reset. The message is safe to show to users."""
+
+
 # ---------------------------------------------------------------------------
 # libvirt event loop (required for non-blocking stream I/O, e.g. the console)
 # ---------------------------------------------------------------------------
@@ -519,6 +523,11 @@ class ConsoleSession:
             if not isinstance(sent, int) or sent <= 0:
                 return
             view = view[sent:]
+
+
+def _scrub(exc: Exception, secret: str) -> str:
+    """Return str(exc) with any occurrence of *secret* masked."""
+    return str(exc).replace(secret, "***") if secret else str(exc)
 
 
 class LibvirtDriver:
@@ -742,6 +751,47 @@ class LibvirtDriver:
         except libvirt.libvirtError as exc:
             logger.error("reboot_vm %s failed: %s", libvirt_uuid, exc)
             return False
+        finally:
+            conn.close()
+
+    def set_user_password(self, libvirt_uuid: str, user: str, password_hash: str) -> None:
+        """Set a guest user's password live through the qemu guest agent.
+
+        *password_hash* must be a crypt(3) hash (e.g. ``$6$...``), never a
+        plaintext password; it is passed to libvirt with
+        VIR_DOMAIN_PASSWORD_ENCRYPTED. No reboot is needed. Raises
+        PasswordResetError with a user-presentable message on any failure; the
+        hash is never logged or included in error messages.
+        """
+        conn = self._connect()
+        try:
+            try:
+                domain = conn.lookupByUUIDString(libvirt_uuid)
+            except libvirt.libvirtError as exc:
+                if exc.get_error_code() == libvirt.VIR_ERR_NO_DOMAIN:
+                    raise PasswordResetError("VM not found on this node") from exc
+                raise PasswordResetError(f"Could not look up the VM: {_scrub(exc, password_hash)}") from exc
+
+            state, _reason = domain.state()
+            if state != libvirt.VIR_DOMAIN_RUNNING:
+                raise PasswordResetError("VM is not running")
+
+            try:
+                domain.setUserPassword(user, password_hash, libvirt.VIR_DOMAIN_PASSWORD_ENCRYPTED)
+            except libvirt.libvirtError as exc:
+                code = exc.get_error_code()
+                if code in (libvirt.VIR_ERR_AGENT_UNRESPONSIVE, libvirt.VIR_ERR_AGENT_UNSYNCED):
+                    raise PasswordResetError(
+                        "The guest agent is not responding. qemu-guest-agent must be "
+                        "installed and running inside the VM"
+                    ) from exc
+                if code == libvirt.VIR_ERR_OPERATION_UNSUPPORTED:
+                    raise PasswordResetError(
+                        "This VM has no guest agent channel (it was created before guest "
+                        "agent support was added)"
+                    ) from exc
+                raise PasswordResetError(f"Password reset failed: {_scrub(exc, password_hash)}") from exc
+            logger.info("Reset password for user %r on VM %s", user, libvirt_uuid)
         finally:
             conn.close()
 

@@ -20,6 +20,7 @@ from agent.libvirt_driver import (
     DomainNotFoundError,
     DomainNotRunningError,
     LibvirtDriver,
+    PasswordResetError,
 )
 from agent.config import settings
 from common.models import AgentCommand, AgentCommandResult
@@ -65,6 +66,12 @@ async def _dispatch(command: AgentCommand) -> AgentCommandResult:
             ok = _libvirt.reboot_vm(p["libvirt_uuid"])
             return AgentCommandResult(success=ok, output="rebooted" if ok else "", error=None if ok else "reboot failed")
 
+        elif cmd == "vm_set_password":
+            # Raises PasswordResetError (message safe to show) on failure; the
+            # generic handler below turns it into an error result.
+            _libvirt.set_user_password(p["libvirt_uuid"], p["user"], p["password_hash"])
+            return AgentCommandResult(success=True, output="password reset")
+
         elif cmd == "vm_destroy":
             ok = _libvirt.destroy_vm(p["libvirt_uuid"])
             return AgentCommandResult(success=ok, output="destroyed" if ok else "", error=None if ok else "destroy failed")
@@ -93,6 +100,12 @@ async def _dispatch(command: AgentCommand) -> AgentCommandResult:
 
         else:
             return AgentCommandResult(success=False, output="", error=f"unknown command: {cmd}")
+
+    except PasswordResetError as exc:
+        # Expected, user-presentable failure (VM stopped, no guest agent...):
+        # no traceback, and the payload (password hash) is never logged.
+        logger.warning("Command %s failed: %s", cmd, exc)
+        return AgentCommandResult(success=False, output="", error=str(exc))
 
     except Exception as exc:
         logger.exception("Error dispatching command %s", cmd)

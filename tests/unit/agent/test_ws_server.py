@@ -311,3 +311,37 @@ class TestConsoleEndpoint:
         ws.send_bytes.assert_awaited_once_with(b"boot message")
         session.close.assert_called_once()
         ws.close.assert_awaited_once_with()
+
+
+class TestVmSetPasswordCommand:
+    _PAYLOAD = {"libvirt_uuid": "abc-123", "user": "ubuntu", "password_hash": "$6$salt$secrethash"}
+
+    @pytest.mark.asyncio
+    async def test_dispatches_to_driver(self):
+        libvirt = MagicMock()
+        with patch("agent.ws_server._libvirt", libvirt):
+            result = await _dispatch(AgentCommand(command="vm_set_password", payload=self._PAYLOAD))
+        assert result.success is True
+        libvirt.set_user_password.assert_called_once_with("abc-123", "ubuntu", "$6$salt$secrethash")
+
+    @pytest.mark.asyncio
+    async def test_driver_error_message_is_returned_without_traceback_or_hash(self, caplog):
+        from agent.libvirt_driver import PasswordResetError
+
+        libvirt = MagicMock()
+        libvirt.set_user_password.side_effect = PasswordResetError("VM is not running")
+        with patch("agent.ws_server._libvirt", libvirt), caplog.at_level("DEBUG"):
+            result = await _dispatch(AgentCommand(command="vm_set_password", payload=self._PAYLOAD))
+        assert result.success is False
+        assert result.error == "VM is not running"
+        assert "secrethash" not in caplog.text
+        assert "Traceback" not in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_unexpected_error_is_still_reported(self):
+        libvirt = MagicMock()
+        libvirt.set_user_password.side_effect = RuntimeError("boom")
+        with patch("agent.ws_server._libvirt", libvirt):
+            result = await _dispatch(AgentCommand(command="vm_set_password", payload=self._PAYLOAD))
+        assert result.success is False
+        assert result.error == "boom"

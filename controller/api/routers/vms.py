@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import uuid
 
 from common.models import VMHardwareConfig, VMInfo, VMStatus
@@ -13,7 +14,7 @@ from controller.credentials import generate_password, hash_password
 from controller.db.models import APIKey, Network, Node, Tenant, VM, VMTemplate
 from controller.scheduler.scheduler import Scheduler
 from fastapi import APIRouter, Depends, HTTPException, status
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -74,6 +75,29 @@ class VMCreateResponse(VMInfo):
 
 class MigrateRequest(BaseModel):
     target_node_id: uuid.UUID
+
+
+_LINUX_USERNAME_RE = re.compile(r"[a-z_][a-z0-9_-]{0,31}")  # used with fullmatch (a "$" anchor would accept a trailing newline)
+
+
+class VMPasswordResetRequest(BaseModel):
+    """Optional body for POST /api/v1/vms/{id}/reset-password."""
+
+    user: str | None = None  # defaults to the template's cloud_init_user, or "ubuntu"
+
+    @field_validator("user")
+    @classmethod
+    def _valid_username(cls, value: str | None) -> str | None:
+        if value is not None and not _LINUX_USERNAME_RE.fullmatch(value):
+            raise ValueError("must be a valid Linux username (lowercase letters, digits, '_' or '-')")
+        return value
+
+
+class VMPasswordResetResponse(BaseModel):
+    """One-time result of a password reset. The plaintext is never persisted."""
+
+    user: str
+    password: str
 
 
 def _vm_to_info(v: VM) -> VMInfo:
@@ -320,6 +344,55 @@ async def reboot_vm(
     """Reboot a running VM."""
     _, tenant = auth
     return await _vm_action(vm_id, "vm_reboot", session, tenant)
+
+
+@router.post("/{vm_id}/reset-password", response_model=VMPasswordResetResponse)
+async def reset_vm_password(
+    vm_id: uuid.UUID,
+    body: VMPasswordResetRequest | None = None,
+    session: AsyncSession = Depends(db_session),
+    auth: tuple[APIKey | None, Tenant | None] = Depends(current_auth),
+) -> VMPasswordResetResponse:
+    """Reset a guest user's password live through the qemu guest agent.
+
+    Generates a new random password, sends only its hash to the agent, and
+    returns the plaintext once in the response (it is never stored or logged).
+    The VM must be running with qemu-guest-agent active. The user defaults to
+    the template's cloud_init_user (or "ubuntu" for VMs without a template).
+    """
+    _, tenant = auth
+    vm = await _get_vm_or_404(session, vm_id)
+    if tenant is not None and vm.tenant_id != tenant.id:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied")
+    if not vm.libvirt_uuid:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="VM has no libvirt UUID")
+
+    user = body.user if body and body.user else None
+    if user is None:
+        user = "ubuntu"
+        if vm.template_id:
+            tpl_result = await session.execute(select(VMTemplate).where(VMTemplate.id == vm.template_id))
+            tpl = tpl_result.scalar_one_or_none()
+            if tpl and tpl.cloud_init_user:
+                user = tpl.cloud_init_user
+
+    node = await _get_node_or_404(session, vm.node_id)
+    plaintext_password = generate_password()
+    result = await AgentClient().send_command(
+        node.ip_address,
+        "vm_set_password",
+        {
+            "libvirt_uuid": vm.libvirt_uuid,
+            "user": user,
+            "password_hash": hash_password(plaintext_password),
+        },
+    )
+    if not result.success:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Password reset failed: {result.error}",
+        )
+    return VMPasswordResetResponse(user=user, password=plaintext_password)
 
 
 @router.post("/{vm_id}/migrate")

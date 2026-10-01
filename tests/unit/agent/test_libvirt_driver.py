@@ -1909,3 +1909,98 @@ class TestGetConsoleInfo:
             result = driver.get_console_info("test-uuid")
 
         assert result is False
+
+
+# ---------------------------------------------------------------------------
+# set_user_password (live reset through the qemu guest agent)
+# ---------------------------------------------------------------------------
+
+import libvirt as _lv_pw  # noqa: E402
+
+from agent.libvirt_driver import PasswordResetError  # noqa: E402
+
+_PW_HASH = "$6$somesalt$abcdefghijklmnopqrstuvwxyz0123456789"
+
+
+class _CodedLibvirtError(_lv_pw.libvirtError):
+    """libvirtError with a fixed error code, for exercising code-based branches."""
+
+    def __init__(self, message: str, code: int) -> None:
+        super().__init__(message)
+        self._message = message
+        self._code = code
+
+    def get_error_code(self) -> int:
+        return self._code
+
+    def __str__(self) -> str:
+        return self._message
+
+
+class TestSetUserPassword:
+    def _setup(self, state: int = _lv_pw.VIR_DOMAIN_RUNNING, set_error: Exception | None = None):
+        domain = MagicMock()
+        domain.state.return_value = (state, 0)
+        if set_error is not None:
+            domain.setUserPassword.side_effect = set_error
+        conn = MagicMock()
+        conn.lookupByUUIDString.return_value = domain
+        return conn, domain
+
+    def _call(self, conn):
+        driver = LibvirtDriver(uri="qemu:///system", bridge="nos-br")
+        with patch("libvirt.open", return_value=conn):
+            driver.set_user_password("abc-123", "ubuntu", _PW_HASH)
+
+    def test_passes_hash_with_encrypted_flag(self):
+        conn, domain = self._setup()
+        self._call(conn)
+        domain.setUserPassword.assert_called_once_with(
+            "ubuntu", _PW_HASH, _lv_pw.VIR_DOMAIN_PASSWORD_ENCRYPTED
+        )
+        conn.close.assert_called_once()
+
+    def test_stopped_vm_is_rejected_without_calling_guest_agent(self):
+        conn, domain = self._setup(state=_lv_pw.VIR_DOMAIN_SHUTOFF)
+        with pytest.raises(PasswordResetError, match="not running"):
+            self._call(conn)
+        domain.setUserPassword.assert_not_called()
+        conn.close.assert_called_once()
+
+    @pytest.mark.parametrize(
+        "code", [_lv_pw.VIR_ERR_AGENT_UNRESPONSIVE, _lv_pw.VIR_ERR_AGENT_UNSYNCED]
+    )
+    def test_unresponsive_agent_gives_actionable_message(self, code):
+        conn, _ = self._setup(set_error=_CodedLibvirtError("agent timeout", code))
+        with pytest.raises(PasswordResetError, match="guest agent is not responding"):
+            self._call(conn)
+        conn.close.assert_called_once()
+
+    def test_missing_agent_channel_gives_actionable_message(self):
+        err = _CodedLibvirtError("unsupported", _lv_pw.VIR_ERR_OPERATION_UNSUPPORTED)
+        conn, _ = self._setup(set_error=err)
+        with pytest.raises(PasswordResetError, match="no guest agent channel"):
+            self._call(conn)
+
+    def test_other_libvirt_errors_are_wrapped_and_hash_is_masked(self):
+        err = _CodedLibvirtError(f"chpasswd failed for {_PW_HASH}", _lv_pw.VIR_ERR_INTERNAL_ERROR)
+        conn, _ = self._setup(set_error=err)
+        with pytest.raises(PasswordResetError) as excinfo:
+            self._call(conn)
+        message = str(excinfo.value)
+        assert message.startswith("Password reset failed:")
+        assert _PW_HASH not in message
+        assert "***" in message
+
+    def test_unknown_domain_is_reported_as_not_found(self):
+        conn = MagicMock()
+        conn.lookupByUUIDString.side_effect = _CodedLibvirtError("no domain", _lv_pw.VIR_ERR_NO_DOMAIN)
+        with pytest.raises(PasswordResetError, match="VM not found"):
+            self._call(conn)
+        conn.close.assert_called_once()
+
+    def test_success_log_does_not_contain_the_hash(self, caplog):
+        conn, _ = self._setup()
+        with caplog.at_level("DEBUG"):
+            self._call(conn)
+        assert _PW_HASH not in caplog.text
