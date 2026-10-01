@@ -14,9 +14,11 @@ import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { StatusBadge } from '@/components/StatusBadge'
+import { ConfirmDialog } from '@/components/ConfirmDialog'
 import { useNetworks, useCreateNetwork, useDeleteNetwork } from '@/hooks/useNetworks'
 import { useTenants } from '@/hooks/useTenants'
 import { formatDate } from '@/utils/format'
+import type { Network } from '@/types'
 
 export function Networks() {
   const { data: networks = [], isLoading } = useNetworks()
@@ -25,11 +27,24 @@ export function Networks() {
   const { data: tenants = [] } = useTenants()
 
   const [open, setOpen] = useState(false)
+  const [pendingDelete, setPendingDelete] = useState<Network | null>(null)
+  const [deleteError, setDeleteError] = useState<string | null>(null)
   const [name, setName] = useState('')
   const [tenantId, setTenantId] = useState('')
   const [vlanId, setVlanId] = useState('')
   const [cidr, setCidr] = useState('')
   const [gateway, setGateway] = useState('')
+
+  const closeDelete = () => { setPendingDelete(null); setDeleteError(null) }
+
+  const handleDelete = () => {
+    if (!pendingDelete) return
+    setDeleteError(null)
+    deleteNetwork.mutate(pendingDelete.id, {
+      onSuccess: closeDelete,
+      onError: (err: Error) => setDeleteError(err.message),
+    })
+  }
 
   const resetForm = () => { setName(''); setTenantId(''); setVlanId(''); setCidr(''); setGateway('') }
 
@@ -94,7 +109,7 @@ export function Networks() {
                       {formatDate(net.created_at)}
                     </TableCell>
                     <TableCell>
-                      <Button variant="ghost" size="icon" onClick={() => deleteNetwork.mutate(net.id)}>
+                      <Button variant="ghost" size="icon" title="Delete" onClick={() => { setDeleteError(null); setPendingDelete(net) }}>
                         <Trash2 className="h-3.5 w-3.5 text-red-400" />
                       </Button>
                     </TableCell>
@@ -161,6 +176,18 @@ export function Networks() {
           </form>
         </DialogContent>
       </Dialog>
+      <ConfirmDialog
+        open={!!pendingDelete}
+        title={`Delete network ${pendingDelete?.name}?`}
+        description={<p>This cannot be undone.</p>}
+        confirmLabel="Delete"
+        pendingLabel="Deleting..."
+        variant="danger"
+        isPending={deleteNetwork.isPending}
+        error={deleteError}
+        onConfirm={handleDelete}
+        onCancel={closeDelete}
+      />
     </div>
   )
 }

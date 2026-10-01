@@ -12,8 +12,10 @@ import {
 } from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
+import { ConfirmDialog } from '@/components/ConfirmDialog'
 import { useTemplates, useCreateTemplate, useDeleteTemplate } from '@/hooks/useTemplates'
 import { formatDate } from '@/utils/format'
+import type { Template } from '@/types'
 
 export function Templates() {
   const { data: templates = [], isLoading } = useTemplates()
@@ -21,6 +23,8 @@ export function Templates() {
   const deleteTemplate = useDeleteTemplate()
 
   const [open, setOpen] = useState(false)
+  const [pendingDelete, setPendingDelete] = useState<Template | null>(null)
+  const [deleteError, setDeleteError] = useState<string | null>(null)
   const [name, setName] = useState('')
   const [osType, setOsType] = useState('')
   const [imagePath, setImagePath] = useState('')
@@ -29,6 +33,17 @@ export function Templates() {
   const [disk, setDisk] = useState('20')
   const [description, setDescription] = useState('')
   const [cloudInitUser, setCloudInitUser] = useState('ubuntu')
+
+  const closeDelete = () => { setPendingDelete(null); setDeleteError(null) }
+
+  const handleDelete = () => {
+    if (!pendingDelete) return
+    setDeleteError(null)
+    deleteTemplate.mutate(pendingDelete.id, {
+      onSuccess: closeDelete,
+      onError: (err: Error) => setDeleteError(err.message),
+    })
+  }
 
   const resetForm = () => {
     setName(''); setOsType(''); setImagePath(''); setCpu('2'); setRam('2048'); setDisk('20'); setDescription(''); setCloudInitUser('ubuntu')
@@ -108,7 +123,8 @@ export function Templates() {
                       <Button
                         variant="ghost"
                         size="icon"
-                        onClick={() => deleteTemplate.mutate(t.id)}
+                        title="Delete"
+                        onClick={() => { setDeleteError(null); setPendingDelete(t) }}
                       >
                         <Trash2 className="h-3.5 w-3.5 text-red-400" />
                       </Button>
@@ -187,6 +203,18 @@ export function Templates() {
           </form>
         </DialogContent>
       </Dialog>
+      <ConfirmDialog
+        open={!!pendingDelete}
+        title={`Delete template ${pendingDelete?.name}?`}
+        description={<p>This cannot be undone.</p>}
+        confirmLabel="Delete"
+        pendingLabel="Deleting..."
+        variant="danger"
+        isPending={deleteTemplate.isPending}
+        error={deleteError}
+        onConfirm={handleDelete}
+        onCancel={closeDelete}
+      />
     </div>
   )
 }

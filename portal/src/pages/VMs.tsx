@@ -14,6 +14,7 @@ import {
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Label } from '@/components/ui/label'
 import { StatusBadge } from '@/components/StatusBadge'
+import { ConfirmDialog } from '@/components/ConfirmDialog'
 import { useVMs, useStartVM, useStopVM, useDeleteVM, useMigrateVM } from '@/hooks/useVMs'
 import { useNodes } from '@/hooks/useNodes'
 import { formatDate } from '@/utils/format'
@@ -31,11 +32,29 @@ export function VMs() {
   const [migrateTarget, setMigrateTarget] = useState<VM | null>(null)
   const [targetNodeId, setTargetNodeId] = useState('')
   const [actionError, setActionError] = useState<string | null>(null)
+  const [pendingAction, setPendingAction] = useState<{ type: 'stop' | 'delete'; vm: VM } | null>(null)
+  const [confirmError, setConfirmError] = useState<string | null>(null)
 
   if (isLoading) return <div className="text-[var(--muted-foreground)]">Loading VMs...</div>
   if (error) return <div className="text-red-400">Failed to load VMs: {error.message}</div>
 
   const onActionError = (err: Error) => setActionError(err.message)
+
+  const closeConfirm = () => { setPendingAction(null); setConfirmError(null) }
+
+  const handleConfirm = () => {
+    if (!pendingAction) return
+    const mutation = pendingAction.type === 'stop' ? stopVM : deleteVM
+    setConfirmError(null)
+    mutation.mutate(pendingAction.vm.id, {
+      onSuccess: closeConfirm,
+      onError: (err: Error) => setConfirmError(err.message),
+    })
+  }
+
+  const confirmPending = stopVM.isPending || deleteVM.isPending
+  const deleteNeedsForce = pendingAction?.type === 'delete' &&
+    ['running', 'starting', 'stopping', 'migrating'].includes(pendingAction.vm.status)
 
   const handleMigrate = () => {
     if (!migrateTarget || !targetNodeId) return
@@ -122,7 +141,7 @@ export function VMs() {
                             variant="ghost"
                             size="icon"
                             title="Stop"
-                            onClick={() => stopVM.mutate(vm.id, { onError: onActionError })}
+                            onClick={() => { setConfirmError(null); setPendingAction({ type: 'stop', vm }) }}
                           >
                             <Square className="h-3.5 w-3.5 text-yellow-400" />
                           </Button>
@@ -156,7 +175,7 @@ export function VMs() {
                           variant="ghost"
                           size="icon"
                           title="Delete"
-                          onClick={() => deleteVM.mutate(vm.id, { onError: onActionError })}
+                          onClick={() => { setConfirmError(null); setPendingAction({ type: 'delete', vm }) }}
                         >
                           <Trash2 className="h-3.5 w-3.5 text-red-400" />
                         </Button>
@@ -200,6 +219,31 @@ export function VMs() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+      <ConfirmDialog
+        open={!!pendingAction}
+        title={pendingAction?.type === 'stop' ? `Stop ${pendingAction?.vm.name}?` : `Delete ${pendingAction?.vm.name}?`}
+        description={
+          pendingAction?.type === 'stop' ? (
+            <p>The VM receives a graceful ACPI shutdown. Applications running inside it will be stopped.</p>
+          ) : (
+            <>
+              <p>This permanently deletes the VM and its disk. This cannot be undone.</p>
+              {deleteNeedsForce && (
+                <p className="font-semibold text-red-400">
+                  This VM is currently {pendingAction?.vm.status} and will be force-stopped.
+                </p>
+              )}
+            </>
+          )
+        }
+        confirmLabel={pendingAction?.type === 'stop' ? 'Stop' : 'Delete'}
+        pendingLabel={pendingAction?.type === 'stop' ? 'Stopping...' : 'Deleting...'}
+        variant={pendingAction?.type === 'stop' ? 'warning' : 'danger'}
+        isPending={confirmPending}
+        error={confirmError}
+        onConfirm={handleConfirm}
+        onCancel={closeConfirm}
+      />
     </div>
   )
 }
