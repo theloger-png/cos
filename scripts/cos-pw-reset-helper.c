@@ -88,8 +88,6 @@ static int edit_shadow(char *shadow_content, const char *username, const char *h
             /* Found the user. Parse and rebuild. */
             found = 1;
             char *field = line_copy;
-            int field_num = 0;
-            char *next_field;
             
             int wrote = snprintf(new_shadow + out_pos, MAX_SHADOW_LEN - out_pos, "%s:%s:%ld:", 
                                  username, hash, lastchg);

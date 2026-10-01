@@ -656,7 +656,7 @@ if [[ "$ROLE" == "agent" ]]; then
     if [[ ! -f "$HELPER_C" ]]; then
         die "password reset helper source not found at $HELPER_C"
     fi
-    gcc -O2 -Wall -o "$HELPER_BIN" "$HELPER_C" $(pkg-config --cflags --libs guestfs) || \
+    gcc -O2 -Wall -o "$HELPER_BIN" "$HELPER_C" -lguestfs || \
         die "failed to compile password reset helper"
     chmod 755 "$HELPER_BIN"
     echo "  helper compiled and installed at $HELPER_BIN"
