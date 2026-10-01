@@ -16,7 +16,7 @@
 
 ### Console Validation and Edge Cases
 - [ ] Validate console edge cases: window resize, VM stopped while console is open, same console in two tabs, stopped-VM button state
-- [ ] Validate re-exec path: git pull that changes the script itself, on a real machine
+- [ ] Re-validate re-exec path on a real machine after the ORIG_ARGS fix (first run lost the --role argument and printed usage; re-running the same command worked)
 
 ### Deployment / Security / Reliability
 - [ ] Install script: dpkg -s check before apt install, --upgrade-system flag

@@ -105,7 +105,7 @@
 - Postgres password is hardcoded cos/cos.
 - No HTTPS yet (portal and API on plain HTTP).
 - apt-get install on already installed packages upgrades them (seen with libvirt on a node with running VMs); install script should check with dpkg -s first and offer an explicit --upgrade-system flag.
-- Re-exec after a git pull that changes the script itself has not been exercised on a real machine yet.
+- Re-exec after a git pull that changes the script itself: first real run (2026-10-01) exposed a bug (original arguments were lost after the parse loop's shift, so the script printed usage instead of installing); fixed by saving ORIG_ARGS before parsing. The fixed re-exec path still needs one real-machine validation (next update that changes cos-install.sh).
 - Console browser edge cases not yet validated: window resize, VM stopped while console is open, same console in two tabs, stopped-VM button state.
 - Portal bundle is over 1 MB (no code splitting) and npm reports audit warnings (2 moderate, 7 high).
 - VITE_API_URL hardcoded at build time in .env.production - needs dynamic config for multi-env.
