@@ -919,7 +919,14 @@ class LibvirtDriver:
 
 
     def migrate_vm(self, libvirt_uuid: str, target_uri: str) -> bool:
-        """Live-migrate a domain to *target_uri*. Returns True on success."""
+        """Live-migrate a domain to *target_uri*. Returns True on success.
+
+        Storage is per-node local (not shared between hosts), so
+        VIR_MIGRATE_NON_SHARED_DISK is required: it copies every disk that
+        isn't already present on the destination over the migration
+        connection as part of the live migration, rather than assuming
+        shared/NFS-backed storage at the same path on both sides.
+        """
         conn = self._connect()
         try:
             domain = conn.lookupByUUIDString(libvirt_uuid)
@@ -927,7 +934,9 @@ class LibvirtDriver:
             try:
                 domain.migrate(
                     dest_conn,
-                    libvirt.VIR_MIGRATE_LIVE | libvirt.VIR_MIGRATE_PERSIST_DEST,
+                    libvirt.VIR_MIGRATE_LIVE
+                    | libvirt.VIR_MIGRATE_PERSIST_DEST
+                    | libvirt.VIR_MIGRATE_NON_SHARED_DISK,
                     None,
                     None,
                     0,
