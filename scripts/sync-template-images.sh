@@ -82,7 +82,7 @@ die() { echo "Error: $*" >&2; exit 1; }
 # answered - never used for a call whose stdout we plan to capture.
 ssh_interactive() {
     local node="$1"; shift
-    timeout "$STEP_TIMEOUT" ssh -t -o StrictHostKeyChecking=accept-new "${ADMIN_USER}@${node}" "$@"
+    timeout --foreground "$STEP_TIMEOUT" ssh -t -o StrictHostKeyChecking=accept-new "${ADMIN_USER}@${node}" "$@"
 }
 
 # Runs a command on $node as a plain (no -t) SSH call and prints its stdout -
@@ -91,7 +91,7 @@ ssh_interactive() {
 # readable), so it's safe to capture with $().
 ssh_capture() {
     local node="$1"; shift
-    timeout "$STEP_TIMEOUT" ssh -o StrictHostKeyChecking=accept-new "${ADMIN_USER}@${node}" "$@"
+    timeout --foreground "$STEP_TIMEOUT" ssh -o StrictHostKeyChecking=accept-new "${ADMIN_USER}@${node}" "$@"
 }
 
 log "Source: $SOURCE_NODE"
@@ -157,16 +157,16 @@ for target in "${TARGETS[@]}"; do
         # source and target to trust each other.
         TMP_LOCAL="/tmp/cos-sync-image-$$-${fname}"
         log "    Fetching $fname from $SOURCE_NODE (you may be asked for the SSH password for $ADMIN_USER)"
-        if ! timeout "$STEP_TIMEOUT" scp -o StrictHostKeyChecking=accept-new -q "${ADMIN_USER}@${SOURCE_NODE}:/var/lib/libvirt/images/${fname}" "$TMP_LOCAL"; then
+        if ! timeout --foreground "$STEP_TIMEOUT" scp -o StrictHostKeyChecking=accept-new -q "${ADMIN_USER}@${SOURCE_NODE}:/var/lib/libvirt/images/${fname}" "$TMP_LOCAL"; then
             log "    Direct fetch failed - likely a permissions issue on $SOURCE_NODE, making $fname world-readable there and retrying"
             ssh_interactive "$SOURCE_NODE" "sudo chmod a+r '/var/lib/libvirt/images/${fname}'" \
                 || die "could not chmod $fname readable on $SOURCE_NODE (SSH or sudo step timed out or failed after ${STEP_TIMEOUT}s)"
-            timeout "$STEP_TIMEOUT" scp -o StrictHostKeyChecking=accept-new -q "${ADMIN_USER}@${SOURCE_NODE}:/var/lib/libvirt/images/${fname}" "$TMP_LOCAL" \
+            timeout --foreground "$STEP_TIMEOUT" scp -o StrictHostKeyChecking=accept-new -q "${ADMIN_USER}@${SOURCE_NODE}:/var/lib/libvirt/images/${fname}" "$TMP_LOCAL" \
                 || die "fetching $fname from $SOURCE_NODE failed even after making it world-readable"
         fi
 
         log "    Uploading $fname to $target:/tmp (you may be asked for the SSH password for $ADMIN_USER)"
-        timeout "$STEP_TIMEOUT" scp -o StrictHostKeyChecking=accept-new -q "$TMP_LOCAL" "${ADMIN_USER}@${target}:/tmp/${fname}" \
+        timeout --foreground "$STEP_TIMEOUT" scp -o StrictHostKeyChecking=accept-new -q "$TMP_LOCAL" "${ADMIN_USER}@${target}:/tmp/${fname}" \
             || die "uploading $fname to $target failed"
         rm -f "$TMP_LOCAL"
 
