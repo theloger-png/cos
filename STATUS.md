@@ -27,7 +27,7 @@
 - GET/POST/DELETE /api/v1/tenants + API key generation
 - GET/POST/DELETE /api/v1/templates
 - GET/PUT /api/v1/vms/{id}/hardware (CPU/RAM/disk/NIC editing)
-- POST /api/v1/vms/{id}/reset-password (live guest user password reset through qemu-guest-agent; returns the new password once, optional body {user}, default user = template cloud_init_user or ubuntu)
+- POST /api/v1/vms/{id}/reset-password (resets the guest user's password; tries live via qemu-guest-agent if the VM is running, falls back to offline via libguestfs if stopped; returns the new password once, optional body {user}, default user = template cloud_init_user or ubuntu)
 - (Removed 2026-09-24: /api/v1/config/* NOS passthrough endpoints)
 
 ### Scheduler
@@ -100,7 +100,7 @@
 - Guest OS support for cloud-init-based provisioning is scoped to Linux distributions with cloud-init and a Debian/RHEL-family package manager (Ubuntu, Debian, RHEL, Rocky, AlmaLinux, etc.). Windows guests are NOT supported - they require cloudbase-init or similar, not cloud-init #cloud-config.
 - VM seed ISOs and their .seed.json sidecar files in /var/lib/cos/seeds/ are not cleaned up when a VM is destroyed (pre-existing ISO leak).
 - No adoption of pre-existing libvirt domains by a new/rebuilt controller (they keep running but are invisible until restored from a backup or adopted); there is no adoption feature yet.
-- Password reset works live only: the VM must be running with qemu-guest-agent active (VMs created after 2026-09-24, and only if the guest could install the package, which needs network access at first boot). No offline fallback yet (rebuilding the cloud-init seed + reboot would work without network but regenerates the guest's SSH host keys unless ssh_deletekeys is disabled).
+- Offline password reset requires libguestfs and a prebuilt appliance on the agent node (set up automatically by cos-install.sh); encrypted disks and unusual partition layouts are not supported.
 
 ### Known Issues
 - **Agent WebSocket (/ws and /console) has no authentication** - relies entirely on network reachability; needs a shared secret (or similar) before the agent port is exposed to less trusted networks.
@@ -147,6 +147,7 @@
 ## Recent Changes
 
 Latest updates:
+- Offline password reset (VM stopped, via libguestfs): cos-pw-reset-helper C binary edits only the password hash and lastchg fields of /etc/shadow directly on the disk image - no cloud-init seed rebuild, so network config/SSH keys/hostname are untouched; controller tries live reset first and falls back to offline automatically when the VM isn't running; Reset password button now active for both running and stopped VMs. Requires libguestfs-dev + a prebuilt fixed appliance (cos-install.sh builds it with supermin and sets kvm group membership for acceleration). Validated end-to-end on cos-node1 (test1 VM): helper run, VM restarted, login with the new password confirmed working.
 - VM actions in the portal: confirmation dialogs for Stop and Delete (VMs) and Delete (Networks, Templates); new Reset password button (live, through the guest agent) with a reusable one-time credentials dialog
 - Web serial console for running VMs: xterm.js frontend, ticket-authenticated WebSocket relay through controller to agent libvirt stream
 - cos-install.sh fully idempotent: re-run to update any machine (handles git pull, package reinstall, service restart with rollback on failure)

@@ -34,7 +34,7 @@
 
 ### VM Password and ISO Management
 - [x] Password reset for running VM, live through qemu-guest-agent (no reboot)
-- [ ] Offline password reset fallback for VMs without a guest agent or that are stopped (rebuild the cloud-init seed with a new hash, applied at next boot; needs ssh_deletekeys: false validation so SSH host keys are not regenerated)
+- [x] Offline password reset fallback for stopped VMs (2026-10-01) - implemented via libguestfs instead of the originally planned seed-rebuild approach, since a seed rebuild would have rerun every cloud-init per-instance module (SSH host key regen, network config overwrite, hostname reset) rather than just the password. cos-pw-reset-helper edits only the password hash and lastchg fields of /etc/shadow directly on the disk image. Validated end-to-end on cos-node1.
 - [ ] Bake qemu-guest-agent into the base images used by templates, so isolated VMs (no network at first boot) still get the agent
 - [ ] CD/ISO management (upload, attach to VM, set boot order)
 - [ ] Create VM without template (blank disk + boot from attached ISO)
