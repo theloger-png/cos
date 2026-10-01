@@ -93,6 +93,7 @@ for node in "${NODES[@]}"; do
     log "Checking/creating cos SSH keypair on $node (you may be prompted for the sudo password here)"
     ssh_to "$node" '
         set -e
+        sudo rm -f /tmp/cos-pubkey-out.pub
         if [ ! -f /opt/cos/.ssh/id_ed25519 ]; then
             sudo -u cos mkdir -p /opt/cos/.ssh
             sudo -u cos ssh-keygen -t ed25519 -N "" -f /opt/cos/.ssh/id_ed25519 -q
@@ -104,9 +105,12 @@ for node in "${NODES[@]}"; do
         sudo chmod 644 /tmp/cos-pubkey-out.pub
     ' || die "failed to prepare cos SSH key on $node"
 
+    # The temp file above is root-owned (created via sudo cp), so the plain
+    # admin user can read it but can't delete it under /tmp's sticky bit -
+    # leave it in place; the next run's sudo rm at the top cleans it up.
     log "Reading back the public key from $node"
     PUBKEYS["$node"]="$(ssh -o StrictHostKeyChecking=accept-new "${ADMIN_USER}@${node}" \
-        'cat /tmp/cos-pubkey-out.pub && rm -f /tmp/cos-pubkey-out.pub' | tr -d '\r')"
+        'cat /tmp/cos-pubkey-out.pub' | tr -d '\r')"
     [ -n "${PUBKEYS[$node]}" ] || die "failed to get cos public key from $node"
 done
 echo
