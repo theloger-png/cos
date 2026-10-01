@@ -136,7 +136,7 @@ for target in "${TARGETS[@]}"; do
     ssh_interactive "$target" "sudo bash -c \"$STAT_SCRIPT\"" \
         || die "checking existing images on $target timed out or failed after ${STEP_TIMEOUT}s - this is the SSH login or sudo step on $target, see any prompt/error above. Verify the SSH password and that $ADMIN_USER has sudo on $target."
 
-    TARGET_SIZES="$(ssh_capture "$target" "cat '$TARGET_SIZES_TMP'; rm -f '$TARGET_SIZES_TMP'")" \
+    TARGET_SIZES="$(ssh_capture "$target" "cat '$TARGET_SIZES_TMP'; sudo rm -f '$TARGET_SIZES_TMP'")" \
         || die "reading existing image sizes back from $target failed after the check step succeeded"
 
     while IFS=$'\t' read -r fname fsize; do
