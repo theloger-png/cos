@@ -53,6 +53,82 @@ static long days_since_epoch(void) {
 }
 
 /*
+ * Free a NULL-terminated string list as returned by libguestfs functions
+ * like guestfs_inspect_get_mountpoints() or guestfs_inspect_os(). The C API
+ * has no guestfs_free_string_list() function (that's a binding-only
+ * convenience in other languages) - each string plus the array itself must
+ * be freed manually.
+ */
+static void free_string_list(char **list) {
+    if (!list) return;
+    for (char **p = list; *p != NULL; p++) {
+        free(*p);
+    }
+    free(list);
+}
+
+/*
+ * Mount all filesystems for the given inspected root, in mountpoint-length
+ * order (shortest first, e.g. "/" before "/boot") so parent directories
+ * exist before children are mounted on top of them.
+ *
+ * guestfs_mount_all() is not a real libguestfs C API function (it only
+ * exists as a composite guestfish command), so this reimplements it using
+ * guestfs_inspect_get_mountpoints() + guestfs_mount().
+ *
+ * Returns 0 on success, -1 on failure.
+ */
+static int mount_all_filesystems(guestfs_h *g, const char *root) {
+    char **mps = guestfs_inspect_get_mountpoints(g, root);
+    if (!mps) {
+        return -1;
+    }
+
+    int n = 0;
+    for (char **p = mps; p[0] != NULL; p += 2) n++;
+
+    if (n == 0) {
+        free_string_list(mps);
+        return -1;
+    }
+
+    int *order = malloc(n * sizeof(int));
+    if (!order) {
+        free_string_list(mps);
+        return -1;
+    }
+    for (int i = 0; i < n; i++) order[i] = i;
+
+    /* Insertion sort by mountpoint string length (ascending) */
+    for (int i = 1; i < n; i++) {
+        int key = order[i];
+        size_t key_len = strlen(mps[2 * key]);
+        int j = i - 1;
+        while (j >= 0 && strlen(mps[2 * order[j]]) > key_len) {
+            order[j + 1] = order[j];
+            j--;
+        }
+        order[j + 1] = key;
+    }
+
+    int rc = 0;
+    for (int i = 0; i < n; i++) {
+        int idx = order[i];
+        const char *mountpoint = mps[2 * idx];
+        const char *device = mps[2 * idx + 1];
+        if (guestfs_mount(g, device, mountpoint) == -1) {
+            fprintf(stderr, "failed to mount %s on %s\n", device, mountpoint);
+            rc = -1;
+            break;
+        }
+    }
+
+    free(order);
+    free_string_list(mps);
+    return rc;
+}
+
+/*
  * Edit shadow: find username line, replace password hash and lastchg.
  * Returns 0 on success, 1 if user not found, -1 on parse error.
  */
@@ -202,11 +278,13 @@ int main(int argc, char *argv[]) {
     char *root = roots[0];
     
     /* Mount all filesystems */
-    if (guestfs_mount_all(g, root) == -1) {
+    if (mount_all_filesystems(g, root) == -1) {
         fprintf(stderr, "failed to mount filesystems\n");
+        free_string_list(roots);
         guestfs_close(g);
         return 1;
     }
+    free_string_list(roots);  /* root/roots no longer needed past this point */
     
     /* Read /etc/shadow */
     shadow_content = guestfs_cat(g, "/etc/shadow");
