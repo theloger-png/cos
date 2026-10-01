@@ -637,14 +637,25 @@ if [[ "$ROLE" == "agent" ]]; then
     install -d -o cos -g cos -m 755 /var/lib/cos/seeds
 
     step "Building libguestfs appliance for offline password reset"
-    LIBGUESTFS_BACKEND=direct supermin --build --size 1G -f ext2 -o /var/lib/cos/guestfs-appliance > /dev/null 2>&1 || \
-        echo "  warning: supermin build failed or not available; offline password reset may not work"
-    if [[ -d /var/lib/cos/guestfs-appliance ]]; then
-        touch /var/lib/cos/guestfs-appliance/README.fixed
-        chmod -R a+rX /var/lib/cos/guestfs-appliance
-        echo "  libguestfs appliance ready"
+    SUPERMIN_D="/usr/lib/x86_64-linux-gnu/guestfs/supermin.d"
+    if [[ ! -d "$SUPERMIN_D" ]]; then
+        echo "  warning: $SUPERMIN_D not found (libguestfs-tools package layout may differ); offline password reset will not work"
     else
-        echo "  warning: libguestfs appliance directory not created"
+        supermin --build --verbose --if-newer \
+            --lock /var/lib/cos/guestfs-appliance.lock \
+            --copy-kernel -f ext2 --host-cpu x86_64 \
+            "$SUPERMIN_D" \
+            -o /var/lib/cos/guestfs-appliance > /var/log/cos-supermin-build.log 2>&1
+        if [[ $? -ne 0 || ! -f /var/lib/cos/guestfs-appliance/kernel ]]; then
+            echo "  warning: supermin build failed; see /var/log/cos-supermin-build.log; offline password reset will not work"
+        else
+            # A fixed appliance needs README.fixed alongside kernel/initrd/root
+            # (libguestfs checks for this marker file; supermin doesn't create it)
+            echo "Fixed appliance for COS, built with supermin. Rebuild when libguestfs packages are upgraded." \
+                > /var/lib/cos/guestfs-appliance/README.fixed
+            chmod -R a+rX /var/lib/cos/guestfs-appliance
+            echo "  libguestfs appliance built ($(du -sh /var/lib/cos/guestfs-appliance 2>/dev/null | cut -f1))"
+        fi
     fi
 
     step "Adding cos to kvm group for libguestfs KVM acceleration"
