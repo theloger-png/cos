@@ -142,15 +142,16 @@ for node in "${NODES[@]}"; do
         set -e
         sudo install -o cos -g cos -m 600 /tmp/cos-authorized-keys /opt/cos/.ssh/authorized_keys
         rm -f /tmp/cos-authorized-keys
-        sudo -u cos ssh-keyscan -T 5 ${OTHER_NODES[*]} >> /tmp/cos-known-hosts-\$\$ 2>/dev/null || true
-        if [ -s /tmp/cos-known-hosts-\$\$ ]; then
+        KH_TMP=/tmp/cos-known-hosts-\$\$
+        ssh-keyscan -T 5 ${OTHER_NODES[*]} > \"\$KH_TMP\" 2>/dev/null || true
+        if [ -s \"\$KH_TMP\" ]; then
             sudo -u cos touch /opt/cos/.ssh/known_hosts
-            sudo bash -c 'cat /tmp/cos-known-hosts-\$\$ >> /opt/cos/.ssh/known_hosts'
+            cat \"\$KH_TMP\" | sudo -u cos tee -a /opt/cos/.ssh/known_hosts > /dev/null
             sudo -u cos sort -u -o /opt/cos/.ssh/known_hosts /opt/cos/.ssh/known_hosts
             sudo chown cos:cos /opt/cos/.ssh/known_hosts
             sudo chmod 644 /opt/cos/.ssh/known_hosts
         fi
-        rm -f /tmp/cos-known-hosts-\$\$
+        rm -f \"\$KH_TMP\"
     "
 done
 echo
