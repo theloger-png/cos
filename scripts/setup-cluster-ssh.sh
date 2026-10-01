@@ -94,7 +94,7 @@ for node in "${NODES[@]}"; do
     ssh_to "$node" '
         set -e
         sudo rm -f /tmp/cos-pubkey-out.pub
-        if [ ! -f /opt/cos/.ssh/id_ed25519 ]; then
+        if ! sudo test -f /opt/cos/.ssh/id_ed25519; then
             sudo -u cos mkdir -p /opt/cos/.ssh
             sudo -u cos ssh-keygen -t ed25519 -N "" -f /opt/cos/.ssh/id_ed25519 -q
             sudo chmod 700 /opt/cos/.ssh
