@@ -830,7 +830,15 @@ class LibvirtDriver:
             if not disk_path or not os.path.exists(disk_path):
                 raise PasswordResetError("VM disk not found or inaccessible")
 
-            # Call helper script with hash on stdin
+            # Call helper script with hash on stdin. LIBGUESTFS_BACKEND=direct
+            # and LIBGUESTFS_PATH point at the fixed appliance built by
+            # cos-install.sh (see /var/lib/cos/guestfs-appliance); without
+            # these the helper falls back to the default supermin appliance
+            # build path, which the cos user cannot read (needs root to read
+            # /boot/vmlinuz-*), and fails.
+            helper_env = dict(os.environ)
+            helper_env["LIBGUESTFS_BACKEND"] = "direct"
+            helper_env["LIBGUESTFS_PATH"] = "/var/lib/cos/guestfs-appliance"
             try:
                 result = subprocess.run(
                     ["/usr/local/bin/cos-pw-reset-helper", disk_path, user],
@@ -838,6 +846,7 @@ class LibvirtDriver:
                     capture_output=True,
                     text=True,
                     timeout=300,
+                    env=helper_env,
                 )
             except FileNotFoundError:
                 raise PasswordResetError(
@@ -851,7 +860,12 @@ class LibvirtDriver:
             if result.returncode == 3:
                 raise PasswordResetError("Password hash validation failed in helper")
             if result.returncode != 0:
-                # Helper already logged the error to stderr; be generic for user
+                # The helper never writes the hash to stdout/stderr (only reads
+                # it from stdin), so it's safe to log its stderr for diagnosis.
+                logger.error(
+                    "cos-pw-reset-helper failed (rc=%d) for VM %s: %s",
+                    result.returncode, libvirt_uuid, result.stderr.strip(),
+                )
                 raise PasswordResetError("Offline password reset failed (helper returned error)")
 
             logger.info("Reset password offline for user %r on VM %s", user, libvirt_uuid)
