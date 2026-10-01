@@ -168,7 +168,13 @@ def test_reexec_guard_present(script_text: str) -> None:
     by an env var so it cannot loop.
     """
     assert "COS_INSTALL_REEXEC" in script_text
-    assert 'exec "$0" "$@"' in script_text
+    # The parse loop consumes "$@" with shift, so the original arguments must
+    # be saved before it and replayed on re-exec (a bare "$@" would be empty
+    # and the re-executed script would just print usage).
+    assert 'ORIG_ARGS=("$@")' in script_text
+    assert script_text.index('ORIG_ARGS=("$@")') < script_text.index("while [[ $# -gt 0 ]]")
+    assert 'exec "$0" ${ORIG_ARGS[@]+"${ORIG_ARGS[@]}"}' in script_text
+    assert 'exec "$0" "$@"' not in script_text
 
 
 def test_nginx_config_validated_before_reload(script_text: str) -> None:
