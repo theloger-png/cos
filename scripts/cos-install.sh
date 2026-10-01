@@ -78,6 +78,10 @@ step() {
 
 # --- Argument parsing --------------------------------------------------------
 
+# Keep a copy of the original arguments: the parsing loop below consumes "$@"
+# with shift, and the git-update step needs them to re-exec this script.
+ORIG_ARGS=("$@")
+
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --role)
@@ -316,7 +320,7 @@ if [[ -d "$REPO_DIR/.git" ]]; then
             # is harmless.
             echo "  Source updated ($BEFORE_SHA -> $AFTER_SHA) - re-executing the updated script..."
             export COS_INSTALL_REEXEC=1
-            exec "$0" "$@"
+            exec "$0" ${ORIG_ARGS[@]+"${ORIG_ARGS[@]}"}
         fi
     fi
 else
