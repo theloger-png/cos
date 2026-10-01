@@ -340,9 +340,18 @@ if ! id cos > /dev/null 2>&1; then
             --gid cos \
             --home-dir /opt/cos \
             --no-create-home \
-            --shell /usr/sbin/nologin \
+            --shell /bin/bash \
             cos
 fi
+# cos needs a real shell (not /usr/sbin/nologin) for qemu+ssh:// live
+# migration between nodes: sshd invokes the target user's shell to run the
+# remote command even for non-interactive `ssh user@host command` form, and
+# nologin refuses to run ANY command, which would break migration exactly
+# like a login attempt. The security boundary is SSH-key-only auth: cos has
+# no password set (system account), so password/direct login stays
+# impossible regardless of shell. Fix existing installs too, not just fresh
+# ones - this script is meant to be safely re-run.
+usermod --shell /bin/bash cos
 if [[ -n "${SUDO_USER:-}" ]] && [[ "$SUDO_USER" != "root" ]]; then
     usermod -aG cos "$SUDO_USER"
 fi
