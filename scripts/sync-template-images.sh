@@ -69,7 +69,10 @@ die() { echo "Error: $*" >&2; exit 1; }
 
 ssh_to() {
     local node="$1"; shift
-    ssh -o StrictHostKeyChecking=accept-new "${ADMIN_USER}@${node}" "$@"
+    # -t forces a pseudo-terminal so remote `sudo` can prompt for a password
+    # interactively; without it, sudo on the remote end fails with
+    # "a terminal is required to read the password".
+    ssh -t -o StrictHostKeyChecking=accept-new "${ADMIN_USER}@${node}" "$@"
 }
 
 log "Source: $SOURCE_NODE"

@@ -72,7 +72,10 @@ die() { echo "Error: $*" >&2; exit 1; }
 
 ssh_to() {
     local node="$1"; shift
-    ssh -o StrictHostKeyChecking=accept-new "${ADMIN_USER}@${node}" "$@"
+    # -t forces a pseudo-terminal so remote `sudo` can prompt for a password
+    # interactively; without it, sudo on the remote end fails with
+    # "a terminal is required to read the password".
+    ssh -t -o StrictHostKeyChecking=accept-new "${ADMIN_USER}@${node}" "$@"
 }
 
 log "Nodes: ${NODES[*]}"
@@ -92,7 +95,7 @@ for node in "${NODES[@]}"; do
             sudo chmod 644 /opt/cos/.ssh/id_ed25519.pub
         fi
         sudo cat /opt/cos/.ssh/id_ed25519.pub
-    ' > /tmp/pubkey-$$-"$node".txt
+    ' | tr -d '\r' > /tmp/pubkey-$$-"$node".txt
     PUBKEYS["$node"]="$(cat /tmp/pubkey-$$-"$node".txt)"
     rm -f /tmp/pubkey-$$-"$node".txt
     [ -n "${PUBKEYS[$node]}" ] || die "failed to get cos public key from $node"
