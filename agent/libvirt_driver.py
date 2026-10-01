@@ -672,8 +672,24 @@ class LibvirtDriver:
             )
             if result.returncode != 0:
                 logger.error("qemu-img resize failed for %s: %s", disk_path, result.stderr)
+        elif image_path:
+            # image_path was specified (a template was chosen) but the file
+            # doesn't exist on THIS node. Template images are node-local
+            # files, not synced automatically across nodes (see TODO.md,
+            # "Template image distribution across nodes") - silently falling
+            # back to a blank disk here produces a VM with no OS at all,
+            # which looks identical to a working VM in every API response
+            # until someone opens the console and finds nothing. Fail loudly
+            # instead so the real cause is obvious immediately.
+            raise FileNotFoundError(
+                f"Template image not found on this node: {image_path} "
+                f"(the template references a file that doesn't exist here - "
+                f"template images are not automatically copied between nodes, "
+                f"copy it manually or pick a node that already has it)"
+            )
         else:
-            # Create a blank qcow2 disk using qemu-img
+            # No image_path at all (e.g. "create VM without template"):
+            # a blank disk is the intended, legitimate behavior here.
             os.system(f"qemu-img create -f qcow2 {disk_path} {disk_gb}G")
 
         seed_disk_block = ""

@@ -18,6 +18,12 @@
 - [ ] Validate console edge cases: window resize, VM stopped while console is open, same console in two tabs, stopped-VM button state
 - [ ] Re-validate re-exec path on a real machine after the ORIG_ARGS fix (first run lost the --role argument and printed usage; re-running the same command worked)
 
+### Template Image Distribution Across Nodes
+- [x] Immediate fix (2026-10-01): create_vm() now raises instead of silently falling back to a blank disk when a template's image_path doesn't exist on the node the scheduler picked - found via a real bug onboarding cos-node2: a VM was created with an empty disk, booted straight to "no bootable device" with ~0.8s total CPU time ever consumed, and gave zero indication anything was wrong (no error anywhere, console just showed nothing) until someone opened a serial console and investigated why. The underlying gap itself is still unfixed, see below.
+- [ ] The actual problem: VMTemplate.image_path is a plain node-local filesystem path (e.g. /var/lib/libvirt/images/noble-server-cloudimg-amd64.img) entered by hand when the template is created in the portal. It is never copied or synced to other nodes, and the scheduler (best-fit by free RAM) has no awareness of which nodes actually have a given template's image file present. With one node this never mattered; with 2+ nodes any template only usable on the node it was originally placed on fails (now loudly, thanks to the fix above, but still fails) on every other node.
+- [ ] Real fix options, needs a decision: (a) scheduler checks template image presence per-node before placing a VM (needs the agent to report which image paths exist, or the controller to track it), (b) agent auto-fetches the missing image from the controller or another node on demand before creating the VM (needs an image transfer path - could reuse the same qemu+ssh/scp-style approach as migration's NON_SHARED_DISK copy), (c) simplest/manual for now: document that every template image must be manually copied to every node's /var/lib/libvirt/images/ (same filename and path) before it can be used there - acceptable with 2-3 nodes, doesn't scale past that
+- [ ] Once a real fix is chosen, remove the manual-copy requirement from node onboarding docs
+
 ### Deployment / Security / Reliability
 - [ ] Install script: dpkg -s check before apt install, --upgrade-system flag
 - [ ] Shared secret between controller and agent (protects /ws and /console)
