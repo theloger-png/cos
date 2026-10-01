@@ -52,6 +52,50 @@ user data on a re-run; and re-validate the re-run path on a real machine.
 - Commit after each logical unit of work
 - Use conventional commits: feat:, fix:, test:, docs:
 
+## Claude Sandbox Workflow (GitHub access)
+Claude (the assistant, in its own sandboxed container) works in a separate clone
+from the human's dev machines (nos-dev/cos-dev). This is specific to how Claude
+pulls/pushes, not how the human works locally.
+
+- **Sandbox clone:** `/home/claude/cos`, remote `origin` = `https://github.com/theloger-png/cos.git`
+- **Sync before starting any new work:** `git fetch && git reset --hard origin/main` -
+  the sandbox has no persistent state across sessions, so always start from a clean sync,
+  never assume yesterday's local commits still exist.
+- **Auth:** the human provides a fine-grained GitHub PAT (Personal Access Token) at the
+  start of a session, scoped to this repo only, Contents read/write, short expiry
+  (~1 day). Claude never stores it anywhere persistent (no git credential helper, no
+  config file) - it's used inline per command and discarded with the session.
+  The human revokes it manually once the session's work is done; Claude does not
+  have a way to do this itself and should remind the human if a session runs long.
+- **Pull (when needed, e.g. to re-sync mid-session):**
+  ```bash
+  git pull https://<PAT>@github.com/theloger-png/cos.git main
+  ```
+- **Push (both for direct main fixes and feature branches):**
+  ```bash
+  git push https://<PAT>@github.com/theloger-png/cos.git main
+  # or for a feature branch:
+  git push https://<PAT>@github.com/theloger-png/cos.git main:feature/my-branch
+  ```
+  The PAT is embedded in the URL for that single command only - never added to
+  `git remote set-url` or any persisted git config, so it doesn't linger in
+  `.git/config` after the session.
+- **git config identity:** the sandbox has no default git user identity; set once
+  per session if missing (`git config --global user.email` / `user.name`) before
+  the first commit.
+- **Branching default:** push to `feature/...` or `fix/...`, the human merges on
+  cos-dev and deploys from there. Claude can also merge directly to `main` and push
+  when explicitly asked to ("fa merge") - still a one-off authenticated push with
+  the same PAT, not a standing permission.
+- **After the human's cos-dev merges a Claude-pushed branch,** the sandbox's `main`
+  lags until the next `git fetch && git reset --hard origin/main` - don't assume the
+  sandbox reflects what's deployed; re-sync before trusting local state for anything
+  deploy-related (e.g. "what version is live" questions).
+- **This is independent of the human's own workflow** on `nos-dev`/`cos-dev`
+  (`git pull`, local `pip install --force-reinstall`, service restarts) - Claude's
+  sandbox never runs the install scripts or touches the live infrastructure directly;
+  it only produces commits for the human to pull and deploy.
+
 ## Hard Rules
 - Never modify DB models directly - always use SQLAlchemy migrations (Alembic)
 - Never call libvirt directly from controller - always go through agent via WebSocket
