@@ -82,9 +82,15 @@ log "Nodes: ${NODES[*]}"
 echo
 
 # --- Step 1: ensure every node's cos user has a keypair, collect pubkeys ---
+# Split into two ssh calls per node on purpose: the first needs `sudo` and
+# its password prompts must go straight to the terminal (no local piping,
+# or the prompt text gets swallowed into the pipe with no visible cue to
+# type anything - the script just appears to hang); the second only reads a
+# plain world-readable temp file with no sudo involved, so it's safe to
+# pipe/capture normally.
 declare -A PUBKEYS
 for node in "${NODES[@]}"; do
-    log "Checking/creating cos SSH keypair on $node"
+    log "Checking/creating cos SSH keypair on $node (you may be prompted for the sudo password here)"
     ssh_to "$node" '
         set -e
         if [ ! -f /opt/cos/.ssh/id_ed25519 ]; then
@@ -94,10 +100,13 @@ for node in "${NODES[@]}"; do
             sudo chmod 600 /opt/cos/.ssh/id_ed25519
             sudo chmod 644 /opt/cos/.ssh/id_ed25519.pub
         fi
-        sudo cat /opt/cos/.ssh/id_ed25519.pub
-    ' | tr -d '\r' > /tmp/pubkey-$$-"$node".txt
-    PUBKEYS["$node"]="$(cat /tmp/pubkey-$$-"$node".txt)"
-    rm -f /tmp/pubkey-$$-"$node".txt
+        sudo cp /opt/cos/.ssh/id_ed25519.pub /tmp/cos-pubkey-out.pub
+        sudo chmod 644 /tmp/cos-pubkey-out.pub
+    ' || die "failed to prepare cos SSH key on $node"
+
+    log "Reading back the public key from $node"
+    PUBKEYS["$node"]="$(ssh -o StrictHostKeyChecking=accept-new "${ADMIN_USER}@${node}" \
+        'cat /tmp/cos-pubkey-out.pub && rm -f /tmp/cos-pubkey-out.pub' | tr -d '\r')"
     [ -n "${PUBKEYS[$node]}" ] || die "failed to get cos public key from $node"
 done
 echo
@@ -143,9 +152,17 @@ done
 echo
 
 log "Done. Verifying cos-to-cos SSH between the first two nodes..."
+log "(you may be prompted for the sudo password here too)"
 FIRST="${NODES[0]}"
 SECOND="${NODES[1]}"
-if ssh_to "$FIRST" "sudo -u cos ssh -o BatchMode=yes -o ConnectTimeout=5 cos@${SECOND} 'echo ok'" 2>/dev/null | grep -q '^ok$'; then
+
+ssh_to "$FIRST" "sudo -u cos ssh -o BatchMode=yes -o ConnectTimeout=5 cos@${SECOND} 'echo ok' > /tmp/cos-verify-result 2>&1" \
+    || true  # the result file (or lack of it) is the real signal, not this call's own exit code
+
+VERIFY_OUTPUT="$(ssh -o StrictHostKeyChecking=accept-new "${ADMIN_USER}@${FIRST}" \
+    'cat /tmp/cos-verify-result 2>/dev/null; rm -f /tmp/cos-verify-result' | tr -d '\r')"
+
+if [ "$VERIFY_OUTPUT" = "ok" ]; then
     echo
     echo "==================================================================="
     echo "Success: cos@${FIRST} can SSH to cos@${SECOND} without a password."
@@ -155,7 +172,8 @@ else
     echo
     echo "==================================================================="
     echo "WARNING: verification SSH from cos@${FIRST} to cos@${SECOND} did not"
-    echo "succeed. Check the output above for errors, or re-run this script."
+    echo "succeed. Output was: ${VERIFY_OUTPUT:-<empty>}"
+    echo "Check for errors above, or re-run this script."
     echo "==================================================================="
     exit 1
 fi
