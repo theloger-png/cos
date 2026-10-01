@@ -5,6 +5,7 @@ import type {
   VMHardwareConfig,
   VMHardwareChanges,
   ConsoleTicketResponse,
+  VMPasswordReset,
 } from '@/types'
 import client from './client'
 
@@ -30,6 +31,11 @@ export async function startVM(id: string): Promise<VM> {
 
 export async function stopVM(id: string): Promise<VM> {
   const { data } = await client.post<VM>(`/api/v1/vms/${id}/stop`)
+  return data
+}
+
+export async function resetVMPassword(id: string): Promise<VMPasswordReset> {
+  const { data } = await client.post<VMPasswordReset>(`/api/v1/vms/${id}/reset-password`)
   return data
 }
 

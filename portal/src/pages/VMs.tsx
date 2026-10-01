@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { Plus, Play, Square, Trash2, ArrowRightLeft, Settings2, TerminalSquare } from 'lucide-react'
+import { Plus, Play, Square, Trash2, ArrowRightLeft, Settings2, TerminalSquare, KeyRound } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
@@ -15,7 +15,8 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Label } from '@/components/ui/label'
 import { StatusBadge } from '@/components/StatusBadge'
 import { ConfirmDialog } from '@/components/ConfirmDialog'
-import { useVMs, useStartVM, useStopVM, useDeleteVM, useMigrateVM } from '@/hooks/useVMs'
+import { CredentialsDialog } from '@/components/CredentialsDialog'
+import { useVMs, useStartVM, useStopVM, useDeleteVM, useMigrateVM, useResetVMPassword } from '@/hooks/useVMs'
 import { useNodes } from '@/hooks/useNodes'
 import { formatDate } from '@/utils/format'
 import type { VM } from '@/types'
@@ -28,12 +29,14 @@ export function VMs() {
   const stopVM = useStopVM()
   const deleteVM = useDeleteVM()
   const migrateVM = useMigrateVM()
+  const resetPassword = useResetVMPassword()
 
   const [migrateTarget, setMigrateTarget] = useState<VM | null>(null)
   const [targetNodeId, setTargetNodeId] = useState('')
   const [actionError, setActionError] = useState<string | null>(null)
-  const [pendingAction, setPendingAction] = useState<{ type: 'stop' | 'delete'; vm: VM } | null>(null)
+  const [pendingAction, setPendingAction] = useState<{ type: 'stop' | 'delete' | 'reset-password'; vm: VM } | null>(null)
   const [confirmError, setConfirmError] = useState<string | null>(null)
+  const [credentials, setCredentials] = useState<{ vmName: string; user: string; password: string } | null>(null)
 
   if (isLoading) return <div className="text-[var(--muted-foreground)]">Loading VMs...</div>
   if (error) return <div className="text-red-400">Failed to load VMs: {error.message}</div>
@@ -44,17 +47,77 @@ export function VMs() {
 
   const handleConfirm = () => {
     if (!pendingAction) return
-    const mutation = pendingAction.type === 'stop' ? stopVM : deleteVM
     setConfirmError(null)
+    if (pendingAction.type === 'reset-password') {
+      const vmName = pendingAction.vm.name
+      resetPassword.mutate(pendingAction.vm.id, {
+        onSuccess: (data) => {
+          setCredentials({ vmName, user: data.user, password: data.password })
+          closeConfirm()
+        },
+        onError: (err: Error) => setConfirmError(err.message),
+      })
+      return
+    }
+    const mutation = pendingAction.type === 'stop' ? stopVM : deleteVM
     mutation.mutate(pendingAction.vm.id, {
       onSuccess: closeConfirm,
       onError: (err: Error) => setConfirmError(err.message),
     })
   }
 
-  const confirmPending = stopVM.isPending || deleteVM.isPending
+  const confirmPending = stopVM.isPending || deleteVM.isPending || resetPassword.isPending
   const deleteNeedsForce = pendingAction?.type === 'delete' &&
     ['running', 'starting', 'stopping', 'migrating'].includes(pendingAction.vm.status)
+
+  const confirmView = (() => {
+    if (!pendingAction) return null
+    const { type, vm } = pendingAction
+    if (type === 'stop') {
+      return {
+        title: `Stop ${vm.name}?`,
+        description: (
+          <p>The VM receives a graceful ACPI shutdown. Applications running inside it will be stopped.</p>
+        ),
+        confirmLabel: 'Stop',
+        pendingLabel: 'Stopping...',
+        variant: 'warning' as const,
+      }
+    }
+    if (type === 'reset-password') {
+      return {
+        title: `Reset password for ${vm.name}?`,
+        description: (
+          <>
+            <p>
+              A new random password is generated for the VM&apos;s default user and applied
+              immediately through the guest agent. The current password stops working. No reboot is needed.
+            </p>
+            <p>The VM must be running with qemu-guest-agent active.</p>
+          </>
+        ),
+        confirmLabel: 'Reset password',
+        pendingLabel: 'Resetting...',
+        variant: 'warning' as const,
+      }
+    }
+    return {
+      title: `Delete ${vm.name}?`,
+      description: (
+        <>
+          <p>This permanently deletes the VM and its disk. This cannot be undone.</p>
+          {deleteNeedsForce && (
+            <p className="font-semibold text-red-400">
+              This VM is currently {vm.status} and will be force-stopped.
+            </p>
+          )}
+        </>
+      ),
+      confirmLabel: 'Delete',
+      pendingLabel: 'Deleting...',
+      variant: 'danger' as const,
+    }
+  })()
 
   const handleMigrate = () => {
     if (!migrateTarget || !targetNodeId) return
@@ -158,6 +221,15 @@ export function VMs() {
                         <Button
                           variant="ghost"
                           size="icon"
+                          title={vm.status === 'running' ? 'Reset password' : 'Reset password (VM must be running)'}
+                          disabled={vm.status !== 'running'}
+                          onClick={() => { setConfirmError(null); setPendingAction({ type: 'reset-password', vm }) }}
+                        >
+                          <KeyRound className="h-3.5 w-3.5" />
+                        </Button>
+                        <Button
+                          variant="ghost"
+                          size="icon"
                           title="Edit Hardware"
                           onClick={() => navigate(`/vms/${vm.id}/hardware`)}
                         >
@@ -219,30 +291,27 @@ export function VMs() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
       <ConfirmDialog
-        open={!!pendingAction}
-        title={pendingAction?.type === 'stop' ? `Stop ${pendingAction?.vm.name}?` : `Delete ${pendingAction?.vm.name}?`}
-        description={
-          pendingAction?.type === 'stop' ? (
-            <p>The VM receives a graceful ACPI shutdown. Applications running inside it will be stopped.</p>
-          ) : (
-            <>
-              <p>This permanently deletes the VM and its disk. This cannot be undone.</p>
-              {deleteNeedsForce && (
-                <p className="font-semibold text-red-400">
-                  This VM is currently {pendingAction?.vm.status} and will be force-stopped.
-                </p>
-              )}
-            </>
-          )
-        }
-        confirmLabel={pendingAction?.type === 'stop' ? 'Stop' : 'Delete'}
-        pendingLabel={pendingAction?.type === 'stop' ? 'Stopping...' : 'Deleting...'}
-        variant={pendingAction?.type === 'stop' ? 'warning' : 'danger'}
+        open={!!confirmView}
+        title={confirmView?.title ?? ''}
+        description={confirmView?.description}
+        confirmLabel={confirmView?.confirmLabel ?? ''}
+        pendingLabel={confirmView?.pendingLabel}
+        variant={confirmView?.variant}
         isPending={confirmPending}
         error={confirmError}
         onConfirm={handleConfirm}
         onCancel={closeConfirm}
+      />
+
+      <CredentialsDialog
+        open={credentials !== null}
+        user={credentials?.user ?? ''}
+        password={credentials?.password ?? ''}
+        title={credentials ? `New password for ${credentials.vmName}` : 'New password'}
+        dismissLabel="I have saved the password"
+        onDismiss={() => setCredentials(null)}
       />
     </div>
   )

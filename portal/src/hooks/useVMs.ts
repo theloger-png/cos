@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { applyVMHardware, createVM, deleteVM, getVMHardware, getVMs, migrateVM, startVM, stopVM } from '@/api/vms'
-import type { VMCreateRequest, VMCreateResponse, VMHardwareChanges } from '@/types'
+import { applyVMHardware, createVM, deleteVM, getVMHardware, getVMs, migrateVM, resetVMPassword, startVM, stopVM } from '@/api/vms'
+import type { VMCreateRequest, VMCreateResponse, VMHardwareChanges, VMPasswordReset } from '@/types'
 
 export function useVMs() {
   return useQuery({
@@ -39,6 +39,12 @@ export function useDeleteVM() {
   return useMutation({
     mutationFn: (id: string) => deleteVM(id),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['vms'] }),
+  })
+}
+
+export function useResetVMPassword() {
+  return useMutation<VMPasswordReset, Error, string>({
+    mutationFn: (id: string) => resetVMPassword(id),
   })
 }
 

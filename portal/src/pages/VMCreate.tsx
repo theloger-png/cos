@@ -1,18 +1,12 @@
 import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { ArrowLeft, Check, Copy, ShieldAlert } from 'lucide-react'
+import { ArrowLeft } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
-import {
-  Dialog,
-  DialogContent,
-  DialogHeader,
-  DialogTitle,
-  DialogFooter,
-} from '@/components/ui/dialog'
+import { CredentialsDialog } from '@/components/CredentialsDialog'
 import { useCreateVM } from '@/hooks/useVMs'
 import { useTemplates } from '@/hooks/useTemplates'
 import { useNodes } from '@/hooks/useNodes'
@@ -44,33 +38,6 @@ export function VMCreate() {
   const [diskGb, setDiskGb] = useState('')
 
   const [credentials, setCredentials] = useState<Credentials | null>(null)
-  const [copiedField, setCopiedField] = useState<'user' | 'password' | null>(null)
-
-  const copyToClipboard = async (field: 'user' | 'password', text: string) => {
-    try {
-      if (navigator.clipboard && window.isSecureContext) {
-        await navigator.clipboard.writeText(text)
-      } else {
-        // Legacy fallback for non-secure contexts (plain HTTP)
-        const textarea = document.createElement('textarea')
-        textarea.value = text
-        textarea.style.position = 'fixed'
-        textarea.style.opacity = '0'
-        // Attach next to the focused element so the dialog focus trap does not steal focus
-        const host = document.activeElement?.parentElement ?? document.body
-        host.appendChild(textarea)
-        textarea.focus()
-        textarea.select()
-        const ok = document.execCommand('copy')
-        host.removeChild(textarea)
-        if (!ok) throw new Error('execCommand copy failed')
-      }
-      setCopiedField(field)
-      setTimeout(() => setCopiedField(null), 1500)
-    } catch (err) {
-      console.error('Failed to copy to clipboard:', err)
-    }
-  }
 
   const selectedTemplate = templates.find((t) => t.id === templateId)
   const onlineNodes = nodes.filter((n) => n.status === 'online')
@@ -295,73 +262,13 @@ export function VMCreate() {
         </CardContent>
       </Card>
 
-      <Dialog open={credentials !== null} onOpenChange={() => {}}>
-        <DialogContent
-          className="sm:max-w-md"
-          onInteractOutside={(e) => e.preventDefault()}
-        >
-          <DialogHeader>
-            <DialogTitle className="flex items-center gap-2">
-              <ShieldAlert className="h-5 w-5 text-yellow-400" />
-              VM Credentials
-            </DialogTitle>
-          </DialogHeader>
-
-          <div className="rounded-md border border-yellow-500/40 bg-yellow-500/10 p-3 text-sm text-yellow-300 mb-4">
-            Save this password now. It will not be shown again.
-          </div>
-
-          <div className="space-y-4">
-            <div className="space-y-1">
-              <Label className="text-xs text-[var(--muted-foreground)]">Username</Label>
-              <div className="flex items-center gap-2">
-                <code className="flex-1 rounded bg-[var(--muted)] px-3 py-2 text-sm font-mono">
-                  {credentials?.user}
-                </code>
-                <Button
-                  variant="ghost"
-                  size="icon"
-                  className="h-8 w-8 shrink-0"
-                  onClick={() => copyToClipboard('user', credentials?.user ?? '')}
-                >
-                  {copiedField === 'user' ? (
-                    <Check className="h-3.5 w-3.5" />
-                  ) : (
-                    <Copy className="h-3.5 w-3.5" />
-                  )}
-                </Button>
-              </div>
-            </div>
-
-            <div className="space-y-1">
-              <Label className="text-xs text-[var(--muted-foreground)]">Password</Label>
-              <div className="flex items-center gap-2">
-                <code className="flex-1 rounded bg-[var(--muted)] px-3 py-2 text-sm font-mono break-all">
-                  {credentials?.password}
-                </code>
-                <Button
-                  variant="ghost"
-                  size="icon"
-                  className="h-8 w-8 shrink-0"
-                  onClick={() => copyToClipboard('password', credentials?.password ?? '')}
-                >
-                  {copiedField === 'password' ? (
-                    <Check className="h-3.5 w-3.5" />
-                  ) : (
-                    <Copy className="h-3.5 w-3.5" />
-                  )}
-                </Button>
-              </div>
-            </div>
-          </div>
-
-          <DialogFooter className="mt-4">
-            <Button onClick={handleCredentialsDismiss} className="w-full">
-              I have saved the password — continue
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+      <CredentialsDialog
+        open={credentials !== null}
+        user={credentials?.user ?? ''}
+        password={credentials?.password ?? ''}
+        dismissLabel="I have saved the password - continue"
+        onDismiss={handleCredentialsDismiss}
+      />
     </div>
   )
 }

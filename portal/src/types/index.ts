@@ -51,6 +51,11 @@ export interface VMCreateResponse extends VM {
   cloud_init_password: string | null
 }
 
+export interface VMPasswordReset {
+  user: string
+  password: string
+}
+
 export interface Template {
   id: string
   name: string
