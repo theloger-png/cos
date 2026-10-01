@@ -35,7 +35,12 @@
 #     connected via the interface being reconfigured. Have console/IPMI
 #     access ready before confirming.
 #   - The old netplan VLAN file is backed up (renamed with a .bak-<timestamp>
-#     suffix), never deleted, so the migration is reversible.
+#     suffix), never deleted, so the netplan side of the migration is
+#     reversible. The underlying kernel VLAN device (e.g. eno1np0.350) IS
+#     deleted outright though (leaving it in place would make OVS's new
+#     internal port receive zero traffic - see Step 6) - to revert fully,
+#     also recreate it manually after restoring the old netplan file:
+#       ip link add link <PHYS_IFACE> name <PHYS_IFACE>.<VLAN_ID> type vlan id <VLAN_ID>
 #   - On failure after netplan apply, this script does NOT attempt automatic
 #     rollback (that could itself fail silently in a broken network state).
 #     It prints the backup file path so you can manually revert.
@@ -139,13 +144,16 @@ else
 fi
 
 # --- Step 3: find and back up the old netplan VLAN file ---------------------
+# id/link values may or may not be YAML-quoted depending on what generated the
+# file (cloud-init writes e.g. `link: "eno1np0"`, a hand-written file might not)
+# - match both forms with an optional quote character around the value.
 OLD_NETPLAN_FILE_ORIG=""
 OLD_NETPLAN_BACKUP=""
 for f in /etc/netplan/*.yaml; do
     [ -f "$f" ] || continue
     if grep -q '^[[:space:]]*vlans:' "$f" \
-        && grep -qE "^[[:space:]]*id:[[:space:]]*${VLAN_ID}[[:space:]]*\$" "$f" \
-        && grep -qE "^[[:space:]]*link:[[:space:]]*${PHYS_IFACE}[[:space:]]*\$" "$f"; then
+        && grep -qE "^[[:space:]]*id:[[:space:]]*[\"']?${VLAN_ID}[\"']?[[:space:]]*\$" "$f" \
+        && grep -qE "^[[:space:]]*link:[[:space:]]*[\"']?${PHYS_IFACE}[\"']?[[:space:]]*\$" "$f"; then
         OLD_NETPLAN_FILE_ORIG="$f"
         break
     fi
@@ -195,11 +203,29 @@ if [ "$ASSUME_YES" -ne 1 ]; then
     fi
 fi
 
-# --- Step 6: bring the OVS internal port up ---------------------------------
+# --- Step 6: delete the leftover kernel 802.1Q VLAN subinterface ------------
+# Removing the old netplan file (or never having had one) only removes the IP
+# address; the kernel VLAN device itself (e.g. eno1np0.350) can still exist
+# and silently keep claiming all 802.1Q frames for this VID on the physical
+# NIC - the kernel's own 8021q demux runs ahead of the OVS bridge hook on the
+# same interface, so the new OVS internal port ends up with zero rx traffic
+# even though everything in its own config looks correct. Must be deleted
+# outright, not just have its IP removed. This is a disruptive step (if the
+# device currently holds live traffic) so it only runs after confirmation.
+OLD_VLAN_DEV="${PHYS_IFACE}.${VLAN_ID}"
+if ip link show "$OLD_VLAN_DEV" >/dev/null 2>&1; then
+    log "Deleting leftover kernel VLAN device '$OLD_VLAN_DEV' (it would otherwise" \
+        "intercept tagged traffic for VLAN $VLAN_ID before OVS ever sees it)"
+    ip link delete "$OLD_VLAN_DEV"
+else
+    log "No leftover kernel VLAN device '$OLD_VLAN_DEV' found (nothing to clean up here)"
+fi
+
+# --- Step 7: bring the OVS internal port up ---------------------------------
 log "Bringing up interface '$OVS_PORT'"
 ip link set "$OVS_PORT" up
 
-# --- Step 7: apply netplan ---------------------------------------------------
+# --- Step 8: apply netplan ---------------------------------------------------
 log "Applying netplan"
 if ! netplan apply; then
     echo "netplan apply failed." >&2
@@ -207,7 +233,7 @@ if ! netplan apply; then
     exit 1
 fi
 
-# --- Step 8: verify connectivity ---------------------------------------------
+# --- Step 9: verify connectivity ---------------------------------------------
 log "Verifying connectivity to gateway $GATEWAY"
 PING_OK=0
 for attempt in 1 2 3 4 5; do
