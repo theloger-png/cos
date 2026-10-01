@@ -33,7 +33,9 @@
 - [ ] Delete confirmations with resource count (N VMs use this template, etc.)
 
 ### VM Password and ISO Management
-- [ ] Password reset for running VM (regenerate cloud-init seed ISO + graceful reboot)
+- [x] Password reset for running VM, live through qemu-guest-agent (no reboot)
+- [ ] Offline password reset fallback for VMs without a guest agent or that are stopped (rebuild the cloud-init seed with a new hash, applied at next boot; needs ssh_deletekeys: false validation so SSH host keys are not regenerated)
+- [ ] Bake qemu-guest-agent into the base images used by templates, so isolated VMs (no network at first boot) still get the agent
 - [ ] CD/ISO management (upload, attach to VM, set boot order)
 - [ ] Create VM without template (blank disk + boot from attached ISO)
 

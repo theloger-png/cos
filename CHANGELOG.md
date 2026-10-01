@@ -2,6 +2,16 @@
 
 Historical record of changes. Current state lives in STATUS.md.
 
+## Recent Changes (2026-10-01)
+
+### Portal confirmations and password reset
+
+- Reusable ConfirmDialog (Cancel focused by default, close blocked while pending, errors shown inside the dialog) used for VM Stop, VM Delete (extra force-stop warning when the VM is not stopped), Network Delete and Template Delete. Previously these buttons acted on a single click.
+- New "Reset password" action on running VMs: POST /api/v1/vms/{id}/reset-password generates a random password, sends only its SHA-512 hash to the agent (new vm_set_password command), which applies it live with libvirt setUserPassword (VIR_DOMAIN_PASSWORD_ENCRYPTED) through qemu-guest-agent. The plaintext is returned once and never stored or logged; the hash is scrubbed from error messages.
+- CredentialsDialog extracted from VMCreate and shared with the reset flow.
+- Username validation uses fullmatch (a "$" anchor would have accepted a trailing newline; caught by a unit test).
+- cos-install.sh: fixed re-exec after a git pull losing its arguments (ORIG_ARGS); regression test updated accordingly.
+
 ## Recent Changes (2026-09-28)
 
 All on branches feature/vm-console and feature/ovs-networking (merged into main).

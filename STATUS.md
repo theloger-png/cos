@@ -27,6 +27,7 @@
 - GET/POST/DELETE /api/v1/tenants + API key generation
 - GET/POST/DELETE /api/v1/templates
 - GET/PUT /api/v1/vms/{id}/hardware (CPU/RAM/disk/NIC editing)
+- POST /api/v1/vms/{id}/reset-password (live guest user password reset through qemu-guest-agent; returns the new password once, optional body {user}, default user = template cloud_init_user or ubuntu)
 - (Removed 2026-09-24: /api/v1/config/* NOS passthrough endpoints)
 
 ### Scheduler
@@ -46,7 +47,7 @@
 - Heartbeat every 30s: cpu_used, ram_used_mb, disk_used_gb, vm_statuses
 - X-API-Key authentication to controller
 - WebSocket server on :8091
-- Commands: vm_create, vm_start, vm_stop, vm_reboot, vm_destroy, vm_migrate, vm_list, node_stats (configure_vlan/remove_vlan removed 2026-09-24)
+- Commands: vm_create, vm_start, vm_stop, vm_reboot, vm_destroy, vm_migrate, vm_list, node_stats, vm_set_password (configure_vlan/remove_vlan removed 2026-09-24)
 - libvirt_driver: KVM VM lifecycle via libvirt Python bindings
 - NIC VLAN tagging handled in libvirt_driver via OVS domain XML (nos_driver removed)
 
@@ -99,6 +100,7 @@
 - Guest OS support for cloud-init-based provisioning is scoped to Linux distributions with cloud-init and a Debian/RHEL-family package manager (Ubuntu, Debian, RHEL, Rocky, AlmaLinux, etc.). Windows guests are NOT supported - they require cloudbase-init or similar, not cloud-init #cloud-config.
 - VM seed ISOs and their .seed.json sidecar files in /var/lib/cos/seeds/ are not cleaned up when a VM is destroyed (pre-existing ISO leak).
 - No adoption of pre-existing libvirt domains by a new/rebuilt controller (they keep running but are invisible until restored from a backup or adopted); there is no adoption feature yet.
+- Password reset works live only: the VM must be running with qemu-guest-agent active (VMs created after 2026-09-24, and only if the guest could install the package, which needs network access at first boot). No offline fallback yet (rebuilding the cloud-init seed + reboot would work without network but regenerates the guest's SSH host keys unless ssh_deletekeys is disabled).
 
 ### Known Issues
 - **Agent WebSocket (/ws and /console) has no authentication** - relies entirely on network reachability; needs a shared secret (or similar) before the agent port is exposed to less trusted networks.
@@ -145,6 +147,7 @@
 ## Recent Changes
 
 Latest updates:
+- VM actions in the portal: confirmation dialogs for Stop and Delete (VMs) and Delete (Networks, Templates); new Reset password button (live, through the guest agent) with a reusable one-time credentials dialog
 - Web serial console for running VMs: xterm.js frontend, ticket-authenticated WebSocket relay through controller to agent libvirt stream
 - cos-install.sh fully idempotent: re-run to update any machine (handles git pull, package reinstall, service restart with rollback on failure)
 - Backup and restore: pg_dump + secrets + config in a single 0600 tar.gz file
