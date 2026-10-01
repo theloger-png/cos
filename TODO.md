@@ -21,8 +21,9 @@
 ### Template Image Distribution Across Nodes
 - [x] Immediate fix (2026-10-01): create_vm() now raises instead of silently falling back to a blank disk when a template's image_path doesn't exist on the node the scheduler picked - found via a real bug onboarding cos-node2: a VM was created with an empty disk, booted straight to "no bootable device" with ~0.8s total CPU time ever consumed, and gave zero indication anything was wrong (no error anywhere, console just showed nothing) until someone opened a serial console and investigated why. The underlying gap itself is still unfixed, see below.
 - [ ] The actual problem: VMTemplate.image_path is a plain node-local filesystem path (e.g. /var/lib/libvirt/images/noble-server-cloudimg-amd64.img) entered by hand when the template is created in the portal. It is never copied or synced to other nodes, and the scheduler (best-fit by free RAM) has no awareness of which nodes actually have a given template's image file present. With one node this never mattered; with 2+ nodes any template only usable on the node it was originally placed on fails (now loudly, thanks to the fix above, but still fails) on every other node.
-- [ ] Real fix options, needs a decision: (a) scheduler checks template image presence per-node before placing a VM (needs the agent to report which image paths exist, or the controller to track it), (b) agent auto-fetches the missing image from the controller or another node on demand before creating the VM (needs an image transfer path - could reuse the same qemu+ssh/scp-style approach as migration's NON_SHARED_DISK copy), (c) simplest/manual for now: document that every template image must be manually copied to every node's /var/lib/libvirt/images/ (same filename and path) before it can be used there - acceptable with 2-3 nodes, doesn't scale past that
-- [ ] Once a real fix is chosen, remove the manual-copy requirement from node onboarding docs
+- [x] Manual stopgap (2026-10-01): scripts/sync-template-images.sh - run once per new node, copies every *.img/*.qcow2 under /var/lib/libvirt/images/ from a source node that has them to one or more targets over plain SSH/scp (password-prompted, no stored credentials), fixing ownership/permissions on the way. Acceptable with 2-3 nodes, doesn't scale past that.
+- [ ] Real fix options, needs a decision: (a) scheduler checks template image presence per-node before placing a VM (needs the agent to report which image paths exist, or the controller to track it), (b) agent auto-fetches the missing image from the controller or another node on demand before creating the VM (needs an image transfer path - could reuse the same qemu+ssh/scp-style approach as migration's NON_SHARED_DISK copy), (c) keep the manual script above as the permanent answer if the cluster never grows past a handful of nodes
+- [ ] Once a real fix is chosen, remove the manual-copy requirement from node onboarding docs and retire sync-template-images.sh
 
 ### Deployment / Security / Reliability
 - [ ] Install script: dpkg -s check before apt install, --upgrade-system flag
@@ -63,11 +64,12 @@
 - [ ] Optional customized installer ISO (autoinstall) only if many nodes need installing; not needed now
 
 ### VM Live Migration
-- [ ] VM live migration between nodes: libvirt supports it natively, agent already has vm_migrate command, but untested
-  - Requires a second physical node
-  - First version: live migration with disk copy over the dedicated migration VLAN
-  - Later: shared storage (NFS first, Ceph when 3+ nodes)
-  - Requirements to document: same OVS bridge and VLANs on destination, compatible CPU, seed ISOs and backing files copied over, node_id updated in database, rollback on failure
+- [x] cos-node2 onboarded (2026-10-01): second physical node joined, OVS management migrated, data NIC trunked - see STATUS.md Known Issues for a real bug hit during onboarding (OVS internal port receiving zero traffic)
+- [x] VIR_MIGRATE_NON_SHARED_DISK added to migrate_vm() (2026-10-01) - storage is per-node local, not shared, so this flag is required to copy the disk over the migration connection; untested against a real second node until cos-node2 existed
+- [x] scripts/setup-cluster-ssh.sh (2026-10-01) - one-time bootstrap giving the cos user passwordless SSH between all nodes (qemu+ssh:// migration SSHes as whichever user runs cos-agent, i.e. cos, with no explicit user in the URI)
+- [ ] Actual live migration test between cos-node1 and cos-node2 - pending, blocked on the template image gap (see "Template Image Distribution Across Nodes" above) needing to be worked around first so there's a real bootable VM to migrate
+- [ ] Later: shared storage (NFS first, Ceph when 3+ nodes) as an alternative to NON_SHARED_DISK's wire copy, worth revisiting for larger disks where a live wire copy is slow
+- [ ] Requirements to document once validated: same OVS bridge and VLANs on destination (now true for cos-node1/cos-node2), compatible CPU, node_id updated in database, rollback on failure
 
 ### Multi-POP Design
 - [ ] Multi-POP design notes (treat each POP as a failure and storage domain, live migration only inside a POP, regional controllers with thin global layer instead of one controller for 100 nodes; L2 between POPs via VXLAN with one VNI per tenant network)
