@@ -231,8 +231,12 @@ export function VMs() {
                         <Button
                           variant="ghost"
                           size="icon"
-                          title={vm.status === 'running' ? 'Reset password' : 'Reset password (VM must be running)'}
-                          disabled={vm.status !== 'running'}
+                          title={
+                            vm.status === 'running' || vm.status === 'stopped'
+                              ? 'Reset password'
+                              : 'Reset password (VM must be running or stopped)'
+                          }
+                          disabled={vm.status !== 'running' && vm.status !== 'stopped'}
                           onClick={() => { setConfirmError(null); setPendingAction({ type: 'reset-password', vm }) }}
                         >
                           <KeyRound className="h-3.5 w-3.5" />
