@@ -17,6 +17,7 @@ import threading
 import time
 import uuid
 import xml.etree.ElementTree as ET
+from urllib.parse import urlparse
 
 import libvirt
 import psutil
@@ -64,6 +65,76 @@ def _disk_size_gb(path: str) -> float:
     except Exception as exc:
         logger.debug("qemu-img info failed for %s: %s", path, exc)
     return 0.0
+
+
+def _cdrom_source_paths(domain_xml: str) -> list[str]:
+    """Return the <source file='...'/> path of every cdrom disk in domain_xml."""
+    root = ET.fromstring(domain_xml)
+    paths = []
+    for disk in root.findall("./devices/disk[@device='cdrom']"):
+        source = disk.find("source")
+        if source is not None:
+            path = source.get("file")
+            if path:
+                paths.append(path)
+    return paths
+
+
+def _parse_migration_target_host(target_uri: str) -> str:
+    """Extract the destination hostname/IP from a qemu+ssh://<host>/system URI."""
+    host = urlparse(target_uri).hostname
+    if not host:
+        raise RuntimeError(f"cannot determine destination host from target_uri: {target_uri!r}")
+    return host
+
+
+def _copy_seed_iso_to_destination(path: str, dest_host: str) -> None:
+    """scp *path* to *dest_host* at the identical path, as the cos user.
+
+    COS uses the same directory layout on every node (seed ISOs are
+    node-local, never synced), so the destination path is always *path*
+    unchanged. Relies on the passwordless cos-to-cos SSH trust set up by
+    scripts/setup-cluster-ssh.sh; no sudo needed since cos already owns
+    these files locally and on every other node.
+
+    Skipped if *path* doesn't exist locally (nothing to copy) or if the
+    destination already has a same-sized file there (cheap idempotency,
+    same pattern as fetch_template_image - not a checksum). Raises
+    RuntimeError with a clear message if the scp itself fails.
+    """
+    if not os.path.exists(path):
+        logger.warning("cdrom source %s not found locally, skipping copy", path)
+        return
+
+    local_size = os.path.getsize(path)
+
+    try:
+        stat = subprocess.run(
+            ["ssh", "-o", "StrictHostKeyChecking=accept-new", dest_host, "stat", "-c", "%s", path],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        if stat.returncode == 0 and int(stat.stdout.strip()) == local_size:
+            logger.info(
+                "cdrom image %s already present on %s with matching size, skipping copy",
+                path, dest_host,
+            )
+            return
+    except Exception:
+        pass  # best-effort idempotency check only; fall through to scp
+
+    result = subprocess.run(
+        ["scp", "-o", "StrictHostKeyChecking=accept-new", path, f"{dest_host}:{path}"],
+        capture_output=True,
+        text=True,
+        timeout=300,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"failed to copy cdrom image {path} to {dest_host}: {result.stderr.strip()}"
+        )
+    logger.info("Copied cdrom image %s to %s", path, dest_host)
 
 
 _INTERFACE_VLAN_BLOCK = (
@@ -1047,10 +1118,24 @@ class LibvirtDriver:
         isn't already present on the destination over the migration
         connection as part of the live migration, rather than assuming
         shared/NFS-backed storage at the same path on both sides.
+
+        NON_SHARED_DISK only copies writable disks, not read-only cdrom
+        devices - COS attaches the cloud-init seed ISO as exactly that, so
+        any such ISO is scp'd to the destination (same path, node-local
+        storage like everything else under /var/lib/cos) before the libvirt
+        migration starts, using the passwordless cos-to-cos SSH trust set up
+        by scripts/setup-cluster-ssh.sh. Fails fast with a RuntimeError if
+        that copy fails, rather than attempting a migration already known to
+        fail once the destination libvirt tries to open the missing ISO.
         """
         conn = self._connect()
         try:
             domain = conn.lookupByUUIDString(libvirt_uuid)
+
+            dest_host = _parse_migration_target_host(target_uri)
+            for cdrom_path in _cdrom_source_paths(domain.XMLDesc()):
+                _copy_seed_iso_to_destination(cdrom_path, dest_host)
+
             dest_conn = libvirt.open(target_uri)
             try:
                 domain.migrate(
