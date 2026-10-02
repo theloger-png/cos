@@ -34,6 +34,16 @@ export async function stopVM(id: string): Promise<VM> {
   return data
 }
 
+export async function forceStopVM(id: string): Promise<VM> {
+  const { data } = await client.post<VM>(`/api/v1/vms/${id}/force-stop`)
+  return data
+}
+
+export async function rebootVM(id: string): Promise<VM> {
+  const { data } = await client.post<VM>(`/api/v1/vms/${id}/reboot`)
+  return data
+}
+
 export async function resetVMPassword(id: string): Promise<VMPasswordReset> {
   const { data } = await client.post<VMPasswordReset>(`/api/v1/vms/${id}/reset-password`)
   return data

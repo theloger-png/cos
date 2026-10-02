@@ -13,6 +13,7 @@ const variantMap: Record<string, 'success' | 'error' | 'muted' | 'warning'> = {
   inactive: 'muted',
   starting: 'warning',
   stopping: 'warning',
+  paused: 'warning',
   migrating: 'warning',
 }
 

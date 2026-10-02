@@ -1,5 +1,5 @@
 export type NodeStatus = 'online' | 'offline' | 'error'
-export type VMStatus = 'running' | 'stopped' | 'starting' | 'stopping' | 'migrating' | 'error'
+export type VMStatus = 'running' | 'stopped' | 'starting' | 'stopping' | 'paused' | 'migrating' | 'error'
 export type NetworkStatus = 'active' | 'inactive' | 'error'
 
 export interface Node {

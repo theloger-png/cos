@@ -22,7 +22,7 @@
 
 ### API Endpoints
 - GET/POST/DELETE /api/v1/nodes + POST /api/v1/nodes/{id}/heartbeat
-- GET/POST/DELETE /api/v1/vms + start/stop/reboot/migrate actions
+- GET/POST/DELETE /api/v1/vms + start/stop/force-stop/reboot/migrate actions (stop = soft ACPI shutdown, force-stop = hard power-off via libvirt destroy, VM stays defined)
 - GET/POST/DELETE /api/v1/networks
 - GET/POST/DELETE /api/v1/tenants + API key generation
 - GET/POST/DELETE /api/v1/templates
@@ -48,7 +48,7 @@
 - Heartbeat every 30s: cpu_used, ram_used_mb, disk_used_gb, vm_statuses
 - X-API-Key authentication to controller
 - WebSocket server on :8091
-- Commands: vm_create, vm_start, vm_stop, vm_reboot, vm_destroy, vm_migrate, vm_list, node_stats, vm_set_password (configure_vlan/remove_vlan removed 2026-09-24)
+- Commands: vm_create, vm_start, vm_stop, vm_force_stop, vm_reboot, vm_destroy, vm_migrate, vm_list, node_stats, vm_set_password (configure_vlan/remove_vlan removed 2026-09-24)
 - libvirt_driver: KVM VM lifecycle via libvirt Python bindings
 - NIC VLAN tagging handled in libvirt_driver via OVS domain XML (nos_driver removed)
 
@@ -76,7 +76,8 @@
 - Dashboard: stat cards (nodes, VMs, RAM, CPU), nodes online chart, recent VMs
 - Nodes page: table with status badges, resource bars (CPU/RAM/disk), heartbeat time
 - Node Detail: node info + VM list on that node
-- VMs page: table with actions (start/stop/delete/migrate dialog)
+- VMs page: read-only table, click a row to open the VM detail page (same tab)
+- VM detail page (/vms/:id): CPU/RAM/disks/NICs/IPs (from GET /hardware, IPs via guest agent), big Console button (opens new tab), Actions menu (Start, Soft stop, Hard stop, Reboot, Edit hardware, Reset password, Migrate, Delete), reserved Monitoring card (not implemented yet)
 - VM Create: form with template selector, optional node selector
 - Templates page: table + create dialog
 - Networks page: table + create dialog

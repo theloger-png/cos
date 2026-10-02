@@ -1,11 +1,20 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { applyVMHardware, createVM, deleteVM, getVMHardware, getVMs, migrateVM, resetVMPassword, startVM, stopVM } from '@/api/vms'
+import { applyVMHardware, createVM, deleteVM, getVMHardware, getVM, getVMs, migrateVM, rebootVM, resetVMPassword, startVM, stopVM, forceStopVM } from '@/api/vms'
 import type { VMCreateRequest, VMCreateResponse, VMHardwareChanges, VMPasswordReset } from '@/types'
 
 export function useVMs() {
   return useQuery({
     queryKey: ['vms'],
     queryFn: getVMs,
+    refetchInterval: 30_000,
+  })
+}
+
+export function useVM(id: string) {
+  return useQuery({
+    queryKey: ['vms', id],
+    queryFn: () => getVM(id),
+    enabled: !!id,
     refetchInterval: 30_000,
   })
 }
@@ -30,6 +39,22 @@ export function useStopVM() {
   const qc = useQueryClient()
   return useMutation({
     mutationFn: (id: string) => stopVM(id),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['vms'] }),
+  })
+}
+
+export function useForceStopVM() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (id: string) => forceStopVM(id),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['vms'] }),
+  })
+}
+
+export function useRebootVM() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (id: string) => rebootVM(id),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['vms'] }),
   })
 }
