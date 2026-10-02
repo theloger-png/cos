@@ -2253,3 +2253,118 @@ class TestFetchTemplateImage:
                     with patch("subprocess.run", return_value=head_result):
                         with pytest.raises(RuntimeError, match="no write permission"):
                             driver.fetch_template_image("https://example.com/x.img", "x.img")
+
+
+_DOMAIN_XML_NO_CDROM = """
+<domain>
+  <devices>
+    <disk device='disk'>
+      <source file='/var/lib/cos/vms/test.qcow2'/>
+    </disk>
+  </devices>
+</domain>
+"""
+
+_DOMAIN_XML_ONE_CDROM = """
+<domain>
+  <devices>
+    <disk device='disk'>
+      <source file='/var/lib/cos/vms/test.qcow2'/>
+    </disk>
+    <disk device='cdrom'>
+      <source file='/var/lib/cos/seeds/test.iso'/>
+    </disk>
+  </devices>
+</domain>
+"""
+
+
+class TestMigrateVm:
+    def _setup(self, domain_xml: str):
+        conn = _mock_conn()
+        domain = _mock_domain()
+        domain.XMLDesc.return_value = domain_xml
+        conn.lookupByUUIDString.return_value = domain
+        dest_conn = _mock_conn()
+        return conn, domain, dest_conn
+
+    def test_no_cdrom_devices_no_scp_attempted(self, driver):
+        conn, domain, dest_conn = self._setup(_DOMAIN_XML_NO_CDROM)
+
+        with patch("libvirt.open", side_effect=[conn, dest_conn]), \
+             patch("subprocess.run") as mock_run:
+            driver.migrate_vm("some-uuid", "qemu+ssh://10.0.0.2/system")
+
+        mock_run.assert_not_called()
+        domain.migrate.assert_called_once()
+
+    def test_cdrom_scp_success(self, driver, tmp_path):
+        seed_iso = tmp_path / "test.iso"
+        seed_iso.write_bytes(b"iso-bytes")
+        domain_xml = _DOMAIN_XML_ONE_CDROM.replace("/var/lib/cos/seeds/test.iso", str(seed_iso))
+        conn, domain, dest_conn = self._setup(domain_xml)
+
+        stat_result = MagicMock(returncode=1, stdout="")  # no stat match -> fall through to scp
+        scp_result = MagicMock(returncode=0, stderr="")
+
+        def fake_run(cmd, **kwargs):
+            if cmd[0] == "ssh":
+                return stat_result
+            if cmd[0] == "scp":
+                return scp_result
+            raise AssertionError(f"unexpected subprocess command: {cmd}")
+
+        with patch("libvirt.open", side_effect=[conn, dest_conn]), \
+             patch("subprocess.run", side_effect=fake_run) as mock_run:
+            driver.migrate_vm("some-uuid", "qemu+ssh://10.0.0.2/system")
+
+        scp_calls = [c for c in mock_run.call_args_list if c.args[0][0] == "scp"]
+        assert len(scp_calls) == 1
+        scp_cmd = scp_calls[0].args[0]
+        assert scp_cmd[-2] == str(seed_iso)
+        assert scp_cmd[-1] == f"10.0.0.2:{seed_iso}"
+        domain.migrate.assert_called_once()
+
+    def test_scp_failure_raises_before_migrate(self, driver, tmp_path):
+        seed_iso = tmp_path / "test.iso"
+        seed_iso.write_bytes(b"iso-bytes")
+        domain_xml = _DOMAIN_XML_ONE_CDROM.replace("/var/lib/cos/seeds/test.iso", str(seed_iso))
+        conn, domain, dest_conn = self._setup(domain_xml)
+
+        stat_result = MagicMock(returncode=1, stdout="")
+        scp_result = MagicMock(returncode=1, stderr="lost connection")
+
+        def fake_run(cmd, **kwargs):
+            if cmd[0] == "ssh":
+                return stat_result
+            if cmd[0] == "scp":
+                return scp_result
+            raise AssertionError(f"unexpected subprocess command: {cmd}")
+
+        with patch("libvirt.open", side_effect=[conn, dest_conn]), \
+             patch("subprocess.run", side_effect=fake_run):
+            with pytest.raises(RuntimeError, match="failed to copy cdrom image"):
+                driver.migrate_vm("some-uuid", "qemu+ssh://10.0.0.2/system")
+
+        domain.migrate.assert_not_called()
+
+    def test_skips_copy_when_destination_already_has_matching_size(self, driver, tmp_path):
+        seed_iso = tmp_path / "test.iso"
+        seed_iso.write_bytes(b"iso-bytes")
+        domain_xml = _DOMAIN_XML_ONE_CDROM.replace("/var/lib/cos/seeds/test.iso", str(seed_iso))
+        conn, domain, dest_conn = self._setup(domain_xml)
+
+        stat_result = MagicMock(returncode=0, stdout=str(seed_iso.stat().st_size))
+
+        def fake_run(cmd, **kwargs):
+            if cmd[0] == "ssh":
+                return stat_result
+            raise AssertionError(f"unexpected subprocess command (scp should be skipped): {cmd}")
+
+        with patch("libvirt.open", side_effect=[conn, dest_conn]), \
+             patch("subprocess.run", side_effect=fake_run) as mock_run:
+            driver.migrate_vm("some-uuid", "qemu+ssh://10.0.0.2/system")
+
+        scp_calls = [c for c in mock_run.call_args_list if c.args[0][0] == "scp"]
+        assert scp_calls == []
+        domain.migrate.assert_called_once()
