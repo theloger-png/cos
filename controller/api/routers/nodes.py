@@ -175,7 +175,12 @@ async def receive_heartbeat(
     for libvirt_uuid, vm_status in body.vm_statuses.items():
         vm_result = await session.execute(select(VM).where(VM.libvirt_uuid == libvirt_uuid))
         vm = vm_result.scalar_one_or_none()
-        if vm:
+        # Ignore reports for a VM no longer assigned to this node: after a
+        # migration, the domain can briefly (or, without UNDEFINE_SOURCE,
+        # indefinitely) still be defined on its old node, which would
+        # otherwise keep reporting it as stopped there and clobber the
+        # correct status the migrate endpoint just set on its new node.
+        if vm and vm.node_id == node_id:
             vm.status = vm_status.value
 
     await session.commit()
