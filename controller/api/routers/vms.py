@@ -335,6 +335,17 @@ async def stop_vm(
     return await _vm_action(vm_id, "vm_stop", session, tenant)
 
 
+@router.post("/{vm_id}/force-stop")
+async def force_stop_vm(
+    vm_id: uuid.UUID,
+    session: AsyncSession = Depends(db_session),
+    auth: tuple[APIKey | None, Tenant | None] = Depends(current_auth),
+) -> dict:
+    """Hard power-off a VM (no ACPI shutdown); the VM stays defined."""
+    _, tenant = auth
+    return await _vm_action(vm_id, "vm_force_stop", session, tenant)
+
+
 @router.post("/{vm_id}/reboot")
 async def reboot_vm(
     vm_id: uuid.UUID,

@@ -93,6 +93,10 @@ async def _dispatch(
             ok = _libvirt.stop_vm(p["libvirt_uuid"])
             return AgentCommandResult(success=ok, output="stopped" if ok else "", error=None if ok else "stop failed")
 
+        elif cmd == "vm_force_stop":
+            ok = _libvirt.force_stop_vm(p["libvirt_uuid"])
+            return AgentCommandResult(success=ok, output="force stopped" if ok else "", error=None if ok else "force stop failed")
+
         elif cmd == "vm_reboot":
             ok = _libvirt.reboot_vm(p["libvirt_uuid"])
             return AgentCommandResult(success=ok, output="rebooted" if ok else "", error=None if ok else "reboot failed")

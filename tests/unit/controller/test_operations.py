@@ -82,9 +82,14 @@ class TestIsIgnored:
 
 
 class TestBuildDescription:
+    def test_force_stop_route(self):
+        info, tid = operations.classify("POST", f"/api/v1/vms/{_ID}/force-stop")
+        assert info.action == "vm.force_stop"
+        assert operations.build_description(info, "web-01", tid) == "Hard stop VM web-01"
+
     def test_uses_target_name(self):
         info, tid = operations.classify("POST", f"/api/v1/vms/{_ID}/stop")
-        assert operations.build_description(info, "web-01", tid) == "Stop VM web-01"
+        assert operations.build_description(info, "web-01", tid) == "Soft stop VM web-01"
 
     def test_falls_back_to_short_id(self):
         info, tid = operations.classify("DELETE", f"/api/v1/vms/{_ID}")
@@ -221,7 +226,7 @@ class TestMiddleware:
         client = TestClient(_make_app(sessionmaker))
         client.post(f"/api/v1/vms/{vm.id}/stop", headers=_bearer(user))
         (op,) = await _all_ops(sessionmaker)
-        assert op.description == "Stop VM db-02"
+        assert op.description == "Soft stop VM db-02"
 
     @pytest.mark.asyncio
     async def test_handler_can_override_outcome_of_http_200(self, sessionmaker):

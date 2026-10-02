@@ -275,6 +275,31 @@ class TestStartVM:
         assert result is False
 
 
+class TestForceStopVM:
+    def test_success_destroys_without_undefine(self, driver):
+        conn = _mock_conn()
+        domain = _mock_domain()
+        conn.lookupByUUIDString.return_value = domain
+
+        with patch("libvirt.open", return_value=conn):
+            result = driver.force_stop_vm("some-uuid")
+
+        assert result is True
+        domain.destroy.assert_called_once()
+        domain.undefine.assert_not_called()
+        domain.shutdown.assert_not_called()
+
+    def test_error_returns_false(self, driver):
+        import libvirt as _lv
+        conn = _mock_conn()
+        conn.lookupByUUIDString.side_effect = _lv.libvirtError("gone")
+
+        with patch("libvirt.open", return_value=conn):
+            result = driver.force_stop_vm("bad-uuid")
+
+        assert result is False
+
+
 class TestStopVM:
     def test_success(self, driver):
         conn = _mock_conn()

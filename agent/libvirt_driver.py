@@ -960,6 +960,19 @@ class LibvirtDriver:
         finally:
             conn.close()
 
+    def force_stop_vm(self, libvirt_uuid: str) -> bool:
+        """Hard power-off a domain (no ACPI). The domain stays defined. Returns True on success."""
+        conn = self._connect()
+        try:
+            domain = conn.lookupByUUIDString(libvirt_uuid)
+            domain.destroy()
+            return True
+        except libvirt.libvirtError as exc:
+            logger.error("force_stop_vm %s failed: %s", libvirt_uuid, exc)
+            return False
+        finally:
+            conn.close()
+
     def reboot_vm(self, libvirt_uuid: str) -> bool:
         """Reboot a running domain. Returns True on success."""
         conn = self._connect()

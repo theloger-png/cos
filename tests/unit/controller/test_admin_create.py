@@ -396,3 +396,65 @@ class TestAdminOwnershipBypass:
         await delete_network(network_id=network.id, session=session, auth=(None, None))
 
         session.delete.assert_awaited_once_with(network)
+
+
+class TestForceStopVM:
+    def _session(self, vm, node):
+        vm_result = MagicMock()
+        vm_result.scalar_one_or_none.return_value = vm
+        node_result = MagicMock()
+        node_result.scalar_one_or_none.return_value = node
+        session = AsyncMock()
+        session.execute = AsyncMock(side_effect=[vm_result, node_result])
+        return session
+
+    @pytest.mark.asyncio
+    async def test_sends_vm_force_stop(self):
+        from common.models import AgentCommandResult
+        from controller.api.routers.vms import force_stop_vm
+
+        vm = _make_vm(uuid.uuid4())
+        vm.libvirt_uuid = "lv-uuid"
+        node = _make_node()
+        node.id = vm.node_id
+        client = MagicMock()
+        client.send_command = AsyncMock(return_value=AgentCommandResult(success=True, output="force stopped"))
+
+        with patch("controller.api.routers.vms.AgentClient", return_value=client):
+            result = await force_stop_vm(vm_id=vm.id, session=self._session(vm, node), auth=(None, None))
+
+        assert result == {"ok": True}
+        client.send_command.assert_awaited_once_with(node.ip_address, "vm_force_stop", {"libvirt_uuid": "lv-uuid"})
+
+    @pytest.mark.asyncio
+    async def test_agent_failure_is_502(self):
+        from common.models import AgentCommandResult
+        from controller.api.routers.vms import force_stop_vm
+
+        vm = _make_vm(uuid.uuid4())
+        vm.libvirt_uuid = "lv-uuid"
+        node = _make_node()
+        node.id = vm.node_id
+        client = MagicMock()
+        client.send_command = AsyncMock(return_value=AgentCommandResult(success=False, output="", error="boom"))
+
+        with patch("controller.api.routers.vms.AgentClient", return_value=client):
+            with pytest.raises(HTTPException) as exc_info:
+                await force_stop_vm(vm_id=vm.id, session=self._session(vm, node), auth=(None, None))
+
+        assert exc_info.value.status_code == 502
+
+    @pytest.mark.asyncio
+    async def test_other_tenant_is_403(self):
+        from controller.api.routers.vms import force_stop_vm
+
+        vm = _make_vm(uuid.uuid4())
+        vm_result = MagicMock()
+        vm_result.scalar_one_or_none.return_value = vm
+        session = AsyncMock()
+        session.execute = AsyncMock(return_value=vm_result)
+
+        with pytest.raises(HTTPException) as exc_info:
+            await force_stop_vm(vm_id=vm.id, session=session, auth=(None, _make_tenant()))
+
+        assert exc_info.value.status_code == 403

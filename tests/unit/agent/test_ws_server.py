@@ -82,6 +82,26 @@ class TestVmCreateCommand:
         assert call_kwargs.kwargs.get("gateway") == "192.168.1.1"
 
 
+class TestVmForceStopCommand:
+    @pytest.mark.asyncio
+    async def test_success(self):
+        libvirt = MagicMock()
+        libvirt.force_stop_vm = MagicMock(return_value=True)
+        with patch("agent.ws_server._libvirt", libvirt):
+            result = await _dispatch(AgentCommand(command="vm_force_stop", payload={"libvirt_uuid": "u"}))
+        assert result.success is True
+        libvirt.force_stop_vm.assert_called_once_with("u")
+
+    @pytest.mark.asyncio
+    async def test_failure(self):
+        libvirt = MagicMock()
+        libvirt.force_stop_vm = MagicMock(return_value=False)
+        with patch("agent.ws_server._libvirt", libvirt):
+            result = await _dispatch(AgentCommand(command="vm_force_stop", payload={"libvirt_uuid": "u"}))
+        assert result.success is False
+        assert result.error == "force stop failed"
+
+
 class TestUnknownCommand:
     @pytest.mark.asyncio
     async def test_returns_error(self):
