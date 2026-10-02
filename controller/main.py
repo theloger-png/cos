@@ -13,6 +13,7 @@ from pathlib import Path
 import uvicorn
 from controller.api.app import create_app
 from controller.api.auth import ensure_admin_key
+from controller import operations
 from controller.api.auth_users import hash_password
 from controller.config import settings
 from controller.db.models import Node, User
@@ -34,12 +35,35 @@ async def _heartbeat_monitor() -> None:
         cutoff = datetime.now(timezone.utc) - timeout
         async with AsyncSessionLocal() as session:
             result = await session.execute(select(Node))
+            went_offline: list[Node] = []
             for node in result.scalars().all():
                 if node.last_heartbeat and node.last_heartbeat < cutoff:
                     if node.status != "offline":
                         node.status = "offline"
+                        went_offline.append(node)
                         logger.warning("Node %s marked offline (heartbeat timeout)", node.hostname)
             await session.commit()
+        for node in went_offline:
+            await operations.record_system_event(
+                "node.offline",
+                f"Node {node.hostname} marked offline (no heartbeat for {settings.agent_heartbeat_timeout_seconds}s)",
+                success=False,
+                target_type="node",
+                target_id=str(node.id),
+                target_name=node.hostname,
+            )
+
+
+async def _operations_maintenance() -> None:
+    """Purge operation-log rows older than the retention period, once a day."""
+    while True:
+        try:
+            purged = await operations.purge_old_operations()
+            if purged:
+                logger.info("Purged %d operation log entries older than %d days", purged, operations.RETENTION_DAYS)
+        except Exception:
+            logger.exception("Operation log purge failed")
+        await asyncio.sleep(24 * 3600)
 
 
 async def _ensure_admin_user(session) -> None:
@@ -77,10 +101,19 @@ async def lifespan(app: FastAPI):
         await ensure_admin_key(session)
         await _ensure_admin_user(session)
 
+    try:
+        stale = await operations.fail_stale_running_operations()
+        if stale:
+            logger.warning("Marked %d interrupted operation(s) as failed", stale)
+    except Exception:
+        logger.exception("Could not clean up stale operations")
+
     monitor_task = asyncio.create_task(_heartbeat_monitor())
+    maintenance_task = asyncio.create_task(_operations_maintenance())
     logger.info("COS controller started on %s:%d", settings.api_host, settings.api_port)
     yield
     monitor_task.cancel()
+    maintenance_task.cancel()
     await engine.dispose()
 
 

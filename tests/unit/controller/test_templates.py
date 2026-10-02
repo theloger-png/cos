@@ -69,7 +69,7 @@ def _agent_cls(per_ip: dict[str, tuple[bool, str | None]]):
     """Patchable AgentClient whose send_command result depends on node_ip."""
     instance = MagicMock()
 
-    async def _send(node_ip, command, payload, timeout_seconds=30):
+    async def _send(node_ip, command, payload, timeout_seconds=30, on_progress=None):
         success, error = per_ip.get(node_ip, (False, "no mock configured for this IP"))
         result = MagicMock()
         result.success = success
@@ -352,3 +352,75 @@ class TestFetchTemplateImageEndpoint:
 
         assert len(result.results) == 1
         assert result.results[0].hostname == "node1"
+
+
+class TestFetchTemplateImageOperationReporting:
+    """fetch-image reports real progress and its true outcome to the operation log."""
+
+    def _setup(self, nodes, tpl):
+        session = AsyncMock()
+        session.execute = AsyncMock(side_effect=[_result_single(tpl), _result_list(nodes)])
+        session.commit = AsyncMock()
+        return session
+
+    @pytest.mark.asyncio
+    async def test_progress_is_averaged_across_nodes_and_forwarded(self):
+        tpl = _template()
+        n1, n2 = _node("node1", "10.0.0.1"), _node("node2", "10.0.0.2")
+        session = self._setup([n1, n2], tpl)
+        reported: list[int] = []
+
+        async def fake_report(percent, message=None):
+            reported.append(percent)
+
+        async def _send(node_ip, command, payload, timeout_seconds=30, on_progress=None):
+            if node_ip == "10.0.0.1":
+                await on_progress(50 * 1024 * 1024, 100 * 1024 * 1024)  # 50%
+            result = MagicMock()
+            result.success = True
+            result.error = None
+            return result
+
+        instance = MagicMock()
+        instance.send_command = AsyncMock(side_effect=_send)
+        with patch("controller.api.routers.templates.AgentClient", MagicMock(return_value=instance)), \
+             patch("controller.api.routers.templates.operations.report_progress", fake_report):
+            await fetch_template_image(
+                tpl.id, body=FetchImageRequest(url="https://e.com/x.img"), session=session, auth=(None, None)
+            )
+
+        assert reported == [25]  # (50 + 0) / 2 nodes
+
+    @pytest.mark.asyncio
+    async def test_all_nodes_failing_marks_operation_failed_despite_http_200(self):
+        tpl = _template()
+        session = self._setup([_node("node1", "10.0.0.1")], tpl)
+        outcome = {}
+
+        def fake_set_outcome(**kw):
+            outcome.update(kw)
+
+        agent_cls = _agent_cls({"10.0.0.1": (False, "disk full")})
+        with patch("controller.api.routers.templates.AgentClient", agent_cls), \
+             patch("controller.api.routers.templates.operations.set_outcome", fake_set_outcome):
+            result = await fetch_template_image(
+                tpl.id, body=FetchImageRequest(url="https://e.com/x.img"), session=session, auth=(None, None)
+            )
+
+        assert result.results[0].success is False
+        assert outcome["failed"] is True
+        assert "node1: disk full" in outcome["error"]
+
+    @pytest.mark.asyncio
+    async def test_partial_success_is_a_successful_operation_with_summary(self):
+        tpl = _template()
+        session = self._setup([_node("node1", "10.0.0.1"), _node("node2", "10.0.0.2")], tpl)
+        outcome = {}
+        agent_cls = _agent_cls({"10.0.0.1": (True, None), "10.0.0.2": (False, "nope")})
+        with patch("controller.api.routers.templates.AgentClient", agent_cls), \
+             patch("controller.api.routers.templates.operations.set_outcome", lambda **kw: outcome.update(kw)):
+            await fetch_template_image(
+                tpl.id, body=FetchImageRequest(url="https://e.com/x.img"), session=session, auth=(None, None)
+            )
+        assert outcome["failed"] is False
+        assert outcome["message"] == "Image downloaded on 1/2 node(s)"

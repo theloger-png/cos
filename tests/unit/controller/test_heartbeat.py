@@ -125,3 +125,45 @@ class TestReceiveHeartbeat:
         )
 
         session.commit.assert_awaited_once()
+
+
+class TestHeartbeatOperationEvents:
+    """State changes reported by a heartbeat are logged as 'system' operations."""
+
+    @pytest.mark.asyncio
+    async def test_vm_status_change_and_node_coming_online_are_logged(self):
+        from unittest.mock import patch
+
+        node_id = uuid.uuid4()
+        node = _make_node(node_id)
+        node.status = "offline"
+        libvirt_uuid = str(uuid.uuid4())
+        vm = _make_vm(node_id, libvirt_uuid, status="running")
+        session = _build_session(node, [vm])
+
+        with patch("controller.api.routers.nodes.operations.record_system_event", new=AsyncMock()) as rec:
+            await receive_heartbeat(
+                node_id, _payload(node_id, {libvirt_uuid: VMStatus.stopped}), session=session
+            )
+
+        actions = [c.args[0] for c in rec.await_args_list]
+        assert actions == ["node.online", "vm.status"]
+        assert "running -> stopped" in rec.await_args_list[1].args[1]
+        assert rec.await_args_list[1].kwargs["tenant_id"] == vm.tenant_id
+
+    @pytest.mark.asyncio
+    async def test_steady_state_heartbeat_logs_nothing(self):
+        from unittest.mock import patch
+
+        node_id = uuid.uuid4()
+        node = _make_node(node_id)  # already online
+        libvirt_uuid = str(uuid.uuid4())
+        vm = _make_vm(node_id, libvirt_uuid, status="running")
+        session = _build_session(node, [vm])
+
+        with patch("controller.api.routers.nodes.operations.record_system_event", new=AsyncMock()) as rec:
+            await receive_heartbeat(
+                node_id, _payload(node_id, {libvirt_uuid: VMStatus.running}), session=session
+            )
+
+        rec.assert_not_awaited()

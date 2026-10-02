@@ -8,6 +8,7 @@ import uuid
 from urllib.parse import urlparse
 
 from common.models import VMTemplate as VMTemplateSchema
+from controller import operations
 from controller.agent_client.client import AgentClient
 from controller.api.deps import current_auth, db_session
 from controller.db.models import APIKey, Node, Tenant, VMTemplate
@@ -186,14 +187,28 @@ async def fetch_template_image(
         )
 
     agent = AgentClient()
+    # Per-node download percentage; the operation's progress is their mean
+    # (a node whose size is unknown stays at 0 until it finishes).
+    node_progress: dict[uuid.UUID, int] = {n.id: 0 for n in nodes}
 
     async def _fetch_on_node(node: Node) -> NodeFetchResult:
+        async def _on_progress(done: int, total: int | None) -> None:
+            if total:
+                node_progress[node.id] = min(99, int(done * 100 / total))
+                await operations.report_progress(
+                    sum(node_progress.values()) // len(node_progress),
+                    f"Downloading {filename}: {done // (1024 * 1024)} / {total // (1024 * 1024)} MB on {node.hostname}",
+                )
+
         cmd_result = await agent.send_command(
             node.ip_address,
             "template_image_fetch",
             {"url": url, "filename": filename},
             timeout_seconds=_FETCH_IMAGE_TIMEOUT_SECONDS,
+            on_progress=_on_progress,
         )
+        if cmd_result.success:
+            node_progress[node.id] = 100
         return NodeFetchResult(
             node_id=node.id,
             hostname=node.hostname,
@@ -202,6 +217,14 @@ async def fetch_template_image(
         )
 
     node_results = await asyncio.gather(*(_fetch_on_node(n) for n in nodes))
+
+    succeeded = sum(1 for r in node_results if r.success)
+    failures = "; ".join(f"{r.hostname}: {r.error}" for r in node_results if not r.success)
+    operations.set_outcome(
+        failed=succeeded == 0,
+        message=f"Image downloaded on {succeeded}/{len(node_results)} node(s)",
+        error=failures or None,
+    )
 
     if any(r.success for r in node_results):
         tpl.image_url = url
