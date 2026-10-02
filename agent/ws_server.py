@@ -54,6 +54,17 @@ async def _dispatch(command: AgentCommand) -> AgentCommandResult:
             )
             return AgentCommandResult(success=True, output=libvirt_uuid)
 
+        elif cmd == "template_image_fetch":
+            # Run in a thread: this can take up to ~30 minutes for a large
+            # image, and unlike every other (fast) command here, blocking the
+            # event loop for that long would starve heartbeats, other WS
+            # connections, and console sessions on this agent for the whole
+            # download duration.
+            dest_path = await asyncio.to_thread(
+                _libvirt.fetch_template_image, p["url"], p["filename"]
+            )
+            return AgentCommandResult(success=True, output=dest_path)
+
         elif cmd == "vm_start":
             ok = _libvirt.start_vm(p["libvirt_uuid"])
             return AgentCommandResult(success=ok, output="started" if ok else "", error=None if ok else "start failed")

@@ -25,15 +25,21 @@ class AgentClient:
         node_ip: str,
         command: str,
         payload: dict,
+        timeout_seconds: int = _TIMEOUT_SECONDS,
     ) -> AgentCommandResult:
         """Send *command* with *payload* to the agent at *node_ip*.
+
+        *timeout_seconds* defaults to the standard 30s for ordinary fast
+        commands; pass a larger value for commands that can legitimately run
+        much longer (e.g. template_image_fetch, which can take up to ~30
+        minutes for a large image over a slow link).
 
         Returns AgentCommandResult(success=False) on timeout or connection error.
         """
         uri = f"ws://{node_ip}:{_WS_PORT}/ws"
         cmd = AgentCommand(command=command, payload=payload)
         try:
-            async with asyncio.timeout(_TIMEOUT_SECONDS):
+            async with asyncio.timeout(timeout_seconds):
                 async with websockets.connect(uri) as ws:
                     await ws.send(cmd.model_dump_json())
                     raw = await ws.recv()

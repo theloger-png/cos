@@ -229,13 +229,13 @@ def test_step_numbering_is_internally_consistent(script_text: str) -> None:
     assert common_steps == 9
     assert controller_steps == 13
     assert restore_steps == 7
-    assert agent_steps == 9
+    assert agent_steps == 13
     assert backup_steps == 4
     assert step_calls == common_steps + controller_steps + restore_steps + agent_steps + backup_steps
 
     assert "STEP_TOTAL=22" in script_text  # controller: common + controller-only
     assert "STEP_TOTAL=29" in script_text  # controller --restore: + restore steps
-    assert "STEP_TOTAL=18" in script_text  # agent: common + agent-only
+    assert "STEP_TOTAL=22" in script_text  # agent: common + agent-only (coincidentally same total as controller)
     assert "STEP_TOTAL=4" in script_text  # --backup
 
 

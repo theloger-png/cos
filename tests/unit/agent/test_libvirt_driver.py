@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import subprocess
 import uuid
 import xml.etree.ElementTree as ET
@@ -2097,3 +2098,158 @@ class TestSetUserPasswordOffline:
         with patch("libvirt.open", return_value=conn):
             with pytest.raises(PasswordResetError, match="VM not found"):
                 driver.set_user_password_offline("no-such-uuid", "ubuntu", _PW_HASH)
+
+
+
+
+class TestFetchTemplateImage:
+    """Tests for LibvirtDriver.fetch_template_image()."""
+
+    def _driver(self) -> LibvirtDriver:
+        return LibvirtDriver(uri="qemu:///system", bridge="nos-br")
+
+    def test_rejects_non_http_url(self):
+        driver = self._driver()
+        with pytest.raises(RuntimeError, match="http://"):
+            driver.fetch_template_image("ftp://example.com/x.img", "x.img")
+
+    def test_rejects_empty_filename(self):
+        driver = self._driver()
+        with pytest.raises(RuntimeError, match="invalid filename"):
+            driver.fetch_template_image("https://example.com/x.img", "")
+
+    def test_rejects_path_traversal_filename(self):
+        driver = self._driver()
+        with pytest.raises(RuntimeError, match="invalid filename"):
+            driver.fetch_template_image("https://example.com/x.img", "../../etc/passwd")
+
+    def test_rejects_filename_with_slash(self):
+        driver = self._driver()
+        with pytest.raises(RuntimeError, match="invalid filename"):
+            driver.fetch_template_image("https://example.com/x.img", "sub/dir.img")
+
+    def test_skips_download_when_size_already_matches(self, tmp_path):
+        driver = self._driver()
+        dest = tmp_path / "ubuntu.img"
+        dest.write_bytes(b"x" * 1000)
+
+        head_result = MagicMock()
+        head_result.stdout = "HTTP/1.1 200 OK\r\nContent-Length: 1000\r\n"
+
+        with patch("agent.libvirt_driver._TEMPLATE_IMAGES_DIR", str(tmp_path)):
+            with patch("subprocess.run", return_value=head_result) as run_mock:
+                result = driver.fetch_template_image("https://example.com/ubuntu.img", "ubuntu.img")
+
+        assert result == str(dest)
+        # Only the HEAD check should have run - no download (-o) call.
+        run_mock.assert_called_once()
+        assert "-o" not in run_mock.call_args[0][0]
+
+    def test_downloads_and_sets_ownership_when_no_existing_file(self, tmp_path):
+        driver = self._driver()
+
+        head_result = MagicMock()
+        head_result.stdout = "HTTP/1.1 200 OK\r\nContent-Length: 4\r\n"
+        download_result = MagicMock()
+        download_result.returncode = 0
+
+        def fake_run(cmd, **kwargs):
+            if "-o" in cmd:
+                idx = cmd.index("-o")
+                tmp_dest = cmd[idx + 1]
+                with open(tmp_dest, "wb") as f:
+                    f.write(b"data")
+                return download_result
+            return head_result
+
+        with patch("agent.libvirt_driver._TEMPLATE_IMAGES_DIR", str(tmp_path)):
+            with patch("os.path.isdir", return_value=True):
+                with patch("os.access", return_value=True):
+                    with patch("subprocess.run", side_effect=fake_run):
+                        with patch("shutil.chown") as chown_mock:
+                            result = driver.fetch_template_image(
+                                "https://example.com/new.img", "new.img"
+                            )
+
+        dest_path = str(tmp_path / "new.img")
+        assert result == dest_path
+        assert os.path.exists(dest_path)
+        with open(dest_path, "rb") as f:
+            assert f.read() == b"data"
+        chown_mock.assert_called_once_with(dest_path, user="libvirt-qemu", group="kvm")
+        assert oct(os.stat(dest_path).st_mode)[-3:] == "644"
+
+    def test_raises_on_curl_failure(self, tmp_path):
+        driver = self._driver()
+
+        head_result = MagicMock()
+        head_result.stdout = ""  # no Content-Length -> idempotency check skipped
+        fail_result = MagicMock()
+        fail_result.returncode = 22
+        fail_result.stderr = "curl: (22) The requested URL returned error: 404"
+
+        def fake_run(cmd, **kwargs):
+            if "-o" in cmd:
+                return fail_result
+            return head_result
+
+        with patch("agent.libvirt_driver._TEMPLATE_IMAGES_DIR", str(tmp_path)):
+            with patch("os.path.isdir", return_value=True):
+                with patch("os.access", return_value=True):
+                    with patch("subprocess.run", side_effect=fake_run):
+                        with pytest.raises(RuntimeError, match="download failed"):
+                            driver.fetch_template_image("https://example.com/missing.img", "missing.img")
+
+    def test_raises_on_empty_downloaded_file(self, tmp_path):
+        driver = self._driver()
+
+        head_result = MagicMock()
+        head_result.stdout = ""
+        ok_result = MagicMock()
+        ok_result.returncode = 0
+
+        def fake_run(cmd, **kwargs):
+            if "-o" in cmd:
+                idx = cmd.index("-o")
+                tmp_dest = cmd[idx + 1]
+                open(tmp_dest, "wb").close()  # 0-byte file
+                return ok_result
+            return head_result
+
+        with patch("agent.libvirt_driver._TEMPLATE_IMAGES_DIR", str(tmp_path)):
+            with patch("os.path.isdir", return_value=True):
+                with patch("os.access", return_value=True):
+                    with patch("subprocess.run", side_effect=fake_run):
+                        with pytest.raises(RuntimeError, match="empty or missing"):
+                            driver.fetch_template_image("https://example.com/empty.img", "empty.img")
+
+    def test_raises_on_timeout(self, tmp_path):
+        driver = self._driver()
+
+        head_result = MagicMock()
+        head_result.stdout = ""
+
+        def fake_run(cmd, **kwargs):
+            if "-o" in cmd:
+                raise subprocess.TimeoutExpired(cmd, 1850)
+            return head_result
+
+        with patch("agent.libvirt_driver._TEMPLATE_IMAGES_DIR", str(tmp_path)):
+            with patch("os.path.isdir", return_value=True):
+                with patch("os.access", return_value=True):
+                    with patch("subprocess.run", side_effect=fake_run):
+                        with pytest.raises(RuntimeError, match="timed out"):
+                            driver.fetch_template_image("https://example.com/slow.img", "slow.img")
+
+    def test_raises_when_images_dir_not_writable(self, tmp_path):
+        driver = self._driver()
+
+        head_result = MagicMock()
+        head_result.stdout = ""
+
+        with patch("agent.libvirt_driver._TEMPLATE_IMAGES_DIR", str(tmp_path)):
+            with patch("os.path.isdir", return_value=True):
+                with patch("os.access", return_value=False):
+                    with patch("subprocess.run", return_value=head_result):
+                        with pytest.raises(RuntimeError, match="no write permission"):
+                            driver.fetch_template_image("https://example.com/x.img", "x.img")

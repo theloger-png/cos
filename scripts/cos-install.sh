@@ -136,7 +136,7 @@ elif [[ "$ROLE" == "controller" ]]; then
     STEP_TOTAL=22
     [[ "$RESTORE_MODE" -eq 1 ]] && STEP_TOTAL=29
 else
-    STEP_TOTAL=18
+    STEP_TOTAL=22
 fi
 
 # --- Helpers shared by multiple sections -------------------------------------
@@ -644,6 +644,18 @@ if [[ "$ROLE" == "agent" ]]; then
     install -d -o cos -g cos -m 755 /var/lib/cos/images
     install -d -o cos -g cos -m 755 /var/lib/cos/vms
     install -d -o cos -g cos -m 755 /var/lib/cos/seeds
+
+    step "Granting the cos group write access to /var/lib/libvirt/images"
+    # Ships root:root 711 by default from libvirt-daemon-system, which the
+    # unprivileged cos user cannot write into. Needed for the agent's
+    # template_image_fetch command (downloads VM template base images
+    # there, triggered from the portal's Templates page).
+    if [[ -d /var/lib/libvirt/images ]]; then
+        chgrp cos /var/lib/libvirt/images
+        chmod g+w /var/lib/libvirt/images
+    else
+        echo "  warning: /var/lib/libvirt/images does not exist yet (libvirtd not started?) - skipping"
+    fi
 
     step "Building libguestfs appliance for offline password reset"
     SUPERMIN_D="/usr/lib/x86_64-linux-gnu/guestfs/supermin.d"

@@ -25,6 +25,7 @@ logger = logging.getLogger(__name__)
 
 _DISK_BASE_DIR = "/var/lib/cos/vms"
 _SEED_BASE_DIR = "/var/lib/cos/seeds"
+_TEMPLATE_IMAGES_DIR = "/var/lib/libvirt/images"
 _STATIC_IP_NAMESERVERS = ("1.1.1.1", "8.8.8.8")
 
 # ---------------------------------------------------------------------------
@@ -643,6 +644,110 @@ class LibvirtDriver:
             except libvirt.libvirtError as exc:
                 return f"rebuilt cloud-init seed could not be attached: {exc}"
         return None
+
+    def fetch_template_image(self, url: str, filename: str) -> str:
+        """Download a template base image from *url* into
+        /var/lib/libvirt/images/*filename*.
+
+        Returns the local path on success. Raises RuntimeError with a clear,
+        safe-to-display message on any failure (bad URL, network error, disk
+        full, permission issue).
+
+        Only http:// and https:// URLs are accepted - curl supports several
+        other schemes (file://, etc.) that would be inappropriate for an
+        admin-supplied download URL triggered from the portal.
+
+        Skips the download if a file of the same name already exists locally
+        with a size matching the remote Content-Length (cheap idempotency,
+        not a checksum) - re-fetching an already-present template is a no-op.
+
+        Downloads to a temporary path first and atomically renames into
+        place, so a VM creation request racing a slow or failing download
+        never sees a partial file.
+
+        Note: /var/lib/libvirt/images is root:root 711 by default (from the
+        libvirt-daemon-system package), which the unprivileged cos user
+        cannot write into - cos-install.sh chgrp's it to the cos group and
+        adds g+w so this works; if that hasn't been applied (e.g. an
+        installer run predating this feature), this will fail with a clear
+        permission error rather than something confusing.
+        """
+        if not (url.startswith("http://") or url.startswith("https://")):
+            raise RuntimeError("image_url must start with http:// or https://")
+
+        if not filename or "/" in filename or filename in (".", ".."):
+            raise RuntimeError(f"invalid filename derived from URL: {filename!r}")
+
+        images_dir = _TEMPLATE_IMAGES_DIR
+        dest_path = os.path.join(images_dir, filename)
+        tmp_path = dest_path + ".downloading"
+
+        # Cheap idempotency check: skip the download if a same-sized file is
+        # already there. Best-effort only - any failure here just means we
+        # proceed to download instead of skipping, never a hard error.
+        try:
+            head = subprocess.run(
+                ["curl", "-sI", "-L", "--max-time", "30", url],
+                capture_output=True,
+                text=True,
+                timeout=35,
+            )
+            remote_size = None
+            for line in head.stdout.splitlines():
+                if line.lower().startswith("content-length:"):
+                    remote_size = int(line.split(":", 1)[1].strip())
+            if remote_size is not None and os.path.exists(dest_path):
+                if os.path.getsize(dest_path) == remote_size:
+                    logger.info(
+                        "Template image %s already present with matching size (%d bytes), skipping download",
+                        filename, remote_size,
+                    )
+                    return dest_path
+        except Exception:
+            pass
+
+        if not os.path.isdir(images_dir):
+            raise RuntimeError(f"{images_dir} does not exist on this node")
+        if not os.access(images_dir, os.W_OK):
+            raise RuntimeError(
+                f"no write permission on {images_dir} - cos-install.sh should have "
+                f"granted the cos group write access here; try re-running it"
+            )
+
+        try:
+            result = subprocess.run(
+                ["curl", "-fsSL", "--max-time", "1800", "-o", tmp_path, url],
+                capture_output=True,
+                text=True,
+                timeout=1850,
+            )
+        except subprocess.TimeoutExpired:
+            with contextlib.suppress(FileNotFoundError):
+                os.remove(tmp_path)
+            raise RuntimeError("download timed out after 30 minutes") from None
+
+        if result.returncode != 0:
+            with contextlib.suppress(FileNotFoundError):
+                os.remove(tmp_path)
+            raise RuntimeError(f"download failed (curl exit {result.returncode}): {result.stderr.strip()}")
+
+        if not os.path.exists(tmp_path) or os.path.getsize(tmp_path) == 0:
+            with contextlib.suppress(FileNotFoundError):
+                os.remove(tmp_path)
+            raise RuntimeError("download produced an empty or missing file")
+
+        os.replace(tmp_path, dest_path)
+        try:
+            shutil.chown(dest_path, user="libvirt-qemu", group="kvm")
+        except (LookupError, PermissionError) as exc:
+            logger.warning("Could not chown %s to libvirt-qemu:kvm: %s", dest_path, exc)
+        os.chmod(dest_path, 0o644)
+
+        logger.info(
+            "Downloaded template image %s (%d bytes) to %s",
+            filename, os.path.getsize(dest_path), dest_path,
+        )
+        return dest_path
 
     def create_vm(
         self,

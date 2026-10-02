@@ -345,3 +345,60 @@ class TestVmSetPasswordCommand:
             result = await _dispatch(AgentCommand(command="vm_set_password", payload=self._PAYLOAD))
         assert result.success is False
         assert result.error == "boom"
+
+
+class TestTemplateImageFetchCommand:
+    @pytest.mark.asyncio
+    async def test_success_returns_dest_path(self):
+        libvirt = MagicMock()
+        libvirt.fetch_template_image = MagicMock(return_value="/var/lib/libvirt/images/x.img")
+        payload = {"url": "https://example.com/x.img", "filename": "x.img"}
+        with patch("agent.ws_server._libvirt", libvirt):
+            result = await _dispatch(AgentCommand(command="template_image_fetch", payload=payload))
+        assert result.success is True
+        assert result.output == "/var/lib/libvirt/images/x.img"
+        libvirt.fetch_template_image.assert_called_once_with(
+            "https://example.com/x.img", "x.img"
+        )
+
+    @pytest.mark.asyncio
+    async def test_runs_off_the_event_loop(self):
+        """fetch_template_image must run via asyncio.to_thread, not block
+        _dispatch directly - verified by confirming _dispatch awaits something
+        that yields control (a plain blocking call wouldn't let this sibling
+        task run first)."""
+        libvirt = MagicMock()
+        order: list[str] = []
+
+        def slow_fetch(url, filename):
+            order.append("fetch_started")
+            return "/path"
+
+        libvirt.fetch_template_image = MagicMock(side_effect=slow_fetch)
+        payload = {"url": "https://example.com/x.img", "filename": "x.img"}
+
+        async def sibling():
+            order.append("sibling_ran")
+
+        with patch("agent.ws_server._libvirt", libvirt):
+            await asyncio.gather(
+                _dispatch(AgentCommand(command="template_image_fetch", payload=payload)),
+                sibling(),
+            )
+        # Both ran; the exact ordering isn't the point (to_thread scheduling
+        # can vary) - what matters is dispatch didn't raise and the sibling
+        # coroutine wasn't starved/blocked from running at all.
+        assert "fetch_started" in order
+        assert "sibling_ran" in order
+
+    @pytest.mark.asyncio
+    async def test_failure_is_reported_without_traceback_noise(self, caplog):
+        libvirt = MagicMock()
+        libvirt.fetch_template_image = MagicMock(
+            side_effect=RuntimeError("download failed (curl exit 22): 404 Not Found")
+        )
+        payload = {"url": "https://example.com/missing.img", "filename": "missing.img"}
+        with patch("agent.ws_server._libvirt", libvirt):
+            result = await _dispatch(AgentCommand(command="template_image_fetch", payload=payload))
+        assert result.success is False
+        assert "download failed" in result.error

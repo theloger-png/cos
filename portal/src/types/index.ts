@@ -59,6 +59,9 @@ export interface VMPasswordReset {
 export interface Template {
   id: string
   name: string
+  os_type: string
+  image_path: string
+  image_url: string | null
   cpu_cores: number
   ram_mb: number
   disk_gb: number
@@ -71,12 +74,25 @@ export interface Template {
 export interface TemplateCreateRequest {
   name: string
   os_type: string
-  image_path: string
+  image_path?: string
+  image_url?: string
   cpu_cores: number
   ram_mb: number
   disk_gb: number
   description?: string
   cloud_init_user?: string
+}
+
+export interface NodeFetchResult {
+  node_id: string
+  hostname: string
+  success: boolean
+  error: string | null
+}
+
+export interface FetchImageResponse {
+  image_path: string
+  results: NodeFetchResult[]
 }
 
 export interface Network {
