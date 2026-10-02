@@ -402,3 +402,57 @@ class TestTemplateImageFetchCommand:
             result = await _dispatch(AgentCommand(command="template_image_fetch", payload=payload))
         assert result.success is False
         assert "download failed" in result.error
+
+
+class TestVmMigrateCommand:
+    @pytest.mark.asyncio
+    async def test_success_returns_migrated(self):
+        libvirt = MagicMock()
+        libvirt.migrate_vm = MagicMock(return_value=None)
+        payload = {"libvirt_uuid": "vm-uuid", "target_uri": "qemu+ssh://10.0.0.2/system"}
+        with patch("agent.ws_server._libvirt", libvirt):
+            result = await _dispatch(AgentCommand(command="vm_migrate", payload=payload))
+        assert result.success is True
+        assert result.output == "migrated"
+        libvirt.migrate_vm.assert_called_once_with("vm-uuid", "qemu+ssh://10.0.0.2/system")
+
+    @pytest.mark.asyncio
+    async def test_failure_propagates_real_error(self):
+        libvirt = MagicMock()
+        libvirt.migrate_vm = MagicMock(
+            side_effect=RuntimeError("Cannot access storage file '/var/lib/cos/seeds/x.iso'")
+        )
+        payload = {"libvirt_uuid": "vm-uuid", "target_uri": "qemu+ssh://10.0.0.2/system"}
+        with patch("agent.ws_server._libvirt", libvirt):
+            result = await _dispatch(AgentCommand(command="vm_migrate", payload=payload))
+        assert result.success is False
+        assert "Cannot access storage file" in result.error
+
+    @pytest.mark.asyncio
+    async def test_runs_off_the_event_loop(self):
+        """migrate_vm must run via asyncio.to_thread, not block _dispatch
+        directly - a blocking call here would starve the heartbeat loop for
+        the whole migration, which is exactly what caused a migrated VM to
+        flash "paused" in the portal: the heartbeat's overdue sleep would
+        fire the instant migration unblocked the event loop, catching the
+        domain in its brief post-migration PAUSED hand-off state instead of
+        running on its normal schedule."""
+        libvirt = MagicMock()
+        order: list[str] = []
+
+        def slow_migrate(libvirt_uuid, target_uri):
+            order.append("migrate_started")
+
+        libvirt.migrate_vm = MagicMock(side_effect=slow_migrate)
+        payload = {"libvirt_uuid": "vm-uuid", "target_uri": "qemu+ssh://10.0.0.2/system"}
+
+        async def sibling():
+            order.append("sibling_ran")
+
+        with patch("agent.ws_server._libvirt", libvirt):
+            await asyncio.gather(
+                _dispatch(AgentCommand(command="vm_migrate", payload=payload)),
+                sibling(),
+            )
+        assert "migrate_started" in order
+        assert "sibling_ran" in order
