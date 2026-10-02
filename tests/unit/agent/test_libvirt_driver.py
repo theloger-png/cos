@@ -2398,6 +2398,7 @@ class TestMigrateVm:
         conn = _mock_conn()
         domain = _mock_domain()
         domain.XMLDesc.return_value = domain_xml
+        domain.blockInfo.return_value = [_VSIZE, 0, 0]  # capacity, allocation, physical
         conn.lookupByUUIDString.return_value = domain
         dest_conn = _mock_conn()
         return conn, domain, dest_conn
@@ -2427,6 +2428,47 @@ class TestMigrateVm:
         ssh_cmd = next(c for c in calls if c[0] == "ssh" and c[-1] == remote)
         assert "10.0.0.2" in ssh_cmd and "BatchMode=yes" in ssh_cmd
         domain.migrate.assert_called_once()
+
+    def test_virtual_size_comes_from_libvirt_not_qemu_img(self, driver):
+        """qemu-img cannot open a running VM's image (write lock, mode 600)."""
+        conn, domain, dest_conn = self._setup(_DOMAIN_XML_NO_CDROM)
+        calls = []
+
+        self._migrate(driver, conn, dest_conn, calls)
+
+        domain.blockInfo.assert_called_once_with("/var/lib/cos/vms/test.qcow2")
+        assert [c for c in calls if c[0] == "qemu-img"] == []
+
+    def test_virtual_size_falls_back_to_qemu_img_force_share(self, driver):
+        import libvirt as _lv
+        conn, domain, dest_conn = self._setup(_DOMAIN_XML_NO_CDROM)
+        domain.blockInfo.side_effect = _lv.libvirtError("no block info")
+        calls = []
+
+        self._migrate(driver, conn, dest_conn, calls)
+
+        (info,) = [c for c in calls if c[0] == "qemu-img"]
+        assert "-U" in info
+        (remote,) = _create_calls(calls)
+        assert f"{_VSIZE}" in remote
+
+    def test_unreadable_virtual_size_aborts_before_touching_destination(self, driver):
+        import libvirt as _lv
+        conn, domain, dest_conn = self._setup(_DOMAIN_XML_NO_CDROM)
+        domain.blockInfo.side_effect = _lv.libvirtError("no block info")
+        calls = []
+
+        def fake_run(cmd, **kwargs):
+            calls.append(cmd)
+            return MagicMock(returncode=1, stdout="", stderr="Permission denied")
+
+        with patch("libvirt.open", side_effect=[conn, dest_conn]), \
+             patch("subprocess.run", side_effect=fake_run):
+            with pytest.raises(RuntimeError, match="cannot read virtual size"):
+                driver.migrate_vm("some-uuid", "qemu+ssh://10.0.0.2/system")
+
+        assert [c for c in calls if c[0] in ("ssh", "scp")] == []
+        domain.migrate.assert_not_called()
 
     def test_precreates_every_writable_disk(self, driver):
         xml = """

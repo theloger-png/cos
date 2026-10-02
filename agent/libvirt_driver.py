@@ -92,11 +92,22 @@ def _disk_source_paths(domain_xml: str) -> list[str]:
     return paths
 
 
-def _disk_virtual_size_bytes(path: str) -> int:
-    """Return the virtual size of the image at *path* in bytes. Raises RuntimeError on failure."""
+def _disk_virtual_size_bytes(path: str, domain=None) -> int:
+    """Return the virtual size of the image at *path* in bytes. Raises RuntimeError on failure.
+
+    Asks libvirt first (*domain*.blockInfo): it works for a running VM, whose
+    image qemu has write-locked, and for files the agent user cannot open
+    (libvirt chowns them to libvirt-qemu, often mode 600). Falls back to
+    ``qemu-img info -U`` (force-share, tolerates the lock).
+    """
+    if domain is not None:
+        try:
+            return int(domain.blockInfo(path)[0])
+        except (libvirt.libvirtError, IndexError, TypeError, ValueError) as exc:
+            logger.debug("blockInfo failed for %s, falling back to qemu-img: %s", path, exc)
     try:
         result = subprocess.run(
-            ["qemu-img", "info", "--output=json", path],
+            ["qemu-img", "info", "-U", "--output=json", path],
             capture_output=True,
             text=True,
             timeout=30,
@@ -1320,7 +1331,7 @@ class LibvirtDriver:
             cdrom_paths = _cdrom_source_paths(xml)
 
             for disk_path in disk_paths:
-                size_bytes = _disk_virtual_size_bytes(disk_path)
+                size_bytes = _disk_virtual_size_bytes(disk_path, domain)
                 _precreate_disk_on_destination(disk_path, size_bytes, dest_host)
                 created_on_dest.append(disk_path)
             for cdrom_path in cdrom_paths:
