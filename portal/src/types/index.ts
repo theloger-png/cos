@@ -178,3 +178,29 @@ export interface ConsoleTicketResponse {
   ticket: string
   expires_in: number
 }
+
+export type OperationStatus = 'running' | 'success' | 'failed'
+
+export interface Operation {
+  id: string
+  user: string
+  action: string
+  description: string
+  target_type: string | null
+  target_id: string | null
+  target_name: string | null
+  status: OperationStatus
+  /** null = running with no measurable progress (indeterminate bar). */
+  progress: number | null
+  message: string | null
+  error: string | null
+  started_at: string
+  finished_at: string | null
+}
+
+export interface OperationFilters {
+  status?: OperationStatus
+  user?: string
+  /** Action prefix, e.g. "vm" or "vm.create". */
+  action?: string
+}
