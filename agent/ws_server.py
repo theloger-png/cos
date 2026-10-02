@@ -93,8 +93,10 @@ async def _dispatch(command: AgentCommand) -> AgentCommandResult:
             return AgentCommandResult(success=ok, output="destroyed" if ok else "", error=None if ok else "destroy failed")
 
         elif cmd == "vm_migrate":
-            ok = _libvirt.migrate_vm(p["libvirt_uuid"], p["target_uri"])
-            return AgentCommandResult(success=ok, output="migrated" if ok else "", error=None if ok else "migration failed")
+            # Raises RuntimeError with the real libvirt error on failure; the
+            # generic handler below turns it into an error result.
+            _libvirt.migrate_vm(p["libvirt_uuid"], p["target_uri"])
+            return AgentCommandResult(success=True, output="migrated")
 
         elif cmd == "vm_list":
             vms = _libvirt.list_vms()

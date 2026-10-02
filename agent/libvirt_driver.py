@@ -1039,8 +1039,8 @@ class LibvirtDriver:
             conn.close()
 
 
-    def migrate_vm(self, libvirt_uuid: str, target_uri: str) -> bool:
-        """Live-migrate a domain to *target_uri*. Returns True on success.
+    def migrate_vm(self, libvirt_uuid: str, target_uri: str) -> None:
+        """Live-migrate a domain to *target_uri*. Raises on failure.
 
         Storage is per-node local (not shared between hosts), so
         VIR_MIGRATE_NON_SHARED_DISK is required: it copies every disk that
@@ -1063,12 +1063,11 @@ class LibvirtDriver:
                     0,
                 )
                 logger.info("Migrated VM %s to %s", libvirt_uuid, target_uri)
-                return True
             finally:
                 dest_conn.close()
         except libvirt.libvirtError as exc:
             logger.error("migrate_vm %s to %s failed: %s", libvirt_uuid, target_uri, exc)
-            return False
+            raise RuntimeError(str(exc)) from exc
         finally:
             conn.close()
 
