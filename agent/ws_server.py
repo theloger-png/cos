@@ -93,9 +93,18 @@ async def _dispatch(command: AgentCommand) -> AgentCommandResult:
             return AgentCommandResult(success=ok, output="destroyed" if ok else "", error=None if ok else "destroy failed")
 
         elif cmd == "vm_migrate":
-            # Raises RuntimeError with the real libvirt error on failure; the
-            # generic handler below turns it into an error result.
-            _libvirt.migrate_vm(p["libvirt_uuid"], p["target_uri"])
+            # Run in a thread: a live migration (copying the disk and any
+            # seed ISO, then transferring memory) can take a long time, and
+            # blocking the event loop for it would starve heartbeats and
+            # other WS connections for the whole duration - which in turn
+            # delays the heartbeat loop's own sleep, so it fires right after
+            # unblocking and can catch the domain in its brief PAUSED
+            # hand-off state, showing "paused" in the portal for up to a
+            # full heartbeat interval before the next one corrects it to
+            # "running". Raises RuntimeError with the real libvirt error on
+            # failure; the generic handler below turns it into an error
+            # result.
+            await asyncio.to_thread(_libvirt.migrate_vm, p["libvirt_uuid"], p["target_uri"])
             return AgentCommandResult(success=True, output="migrated")
 
         elif cmd == "vm_list":
