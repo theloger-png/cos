@@ -136,7 +136,14 @@ for target in "${TARGETS[@]}"; do
     ssh_interactive "$target" "sudo bash -c \"$STAT_SCRIPT\"" \
         || die "checking existing images on $target timed out or failed after ${STEP_TIMEOUT}s - this is the SSH login or sudo step on $target, see any prompt/error above. Verify the SSH password and that $ADMIN_USER has sudo on $target."
 
-    TARGET_SIZES="$(ssh_capture "$target" "cat '$TARGET_SIZES_TMP'; sudo rm -f '$TARGET_SIZES_TMP'")" \
+    # Not deleting TARGET_SIZES_TMP here on purpose: it's root-owned (created
+    # entirely inside the preceding 'sudo bash -c' call), and this capture
+    # call has no pty for sudo to prompt on if we tried 'sudo rm -f' here -
+    # that's exactly the bug being fixed. Each run uses a fresh $$-suffixed
+    # name, so leaving the occasional stale root-owned file in /tmp is
+    # harmless (no collision with future runs, same tradeoff already made
+    # for the pubkey temp file in setup-cluster-ssh.sh).
+    TARGET_SIZES="$(ssh_capture "$target" "cat '$TARGET_SIZES_TMP'")" \
         || die "reading existing image sizes back from $target failed after the check step succeeded"
 
     while IFS=$'\t' read -r fname fsize; do
