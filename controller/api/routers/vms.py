@@ -77,6 +77,12 @@ class MigrateRequest(BaseModel):
     target_node_id: uuid.UUID
 
 
+# Live migration copies the disks over the network and can legitimately take
+# many minutes; matches nginx's proxy_read_timeout for /api/.
+_MIGRATE_TIMEOUT_SECONDS = 3600
+_LIBVIRT_STATE_RUNNING = 1
+
+
 _LINUX_USERNAME_RE = re.compile(r"[a-z_][a-z0-9_-]{0,31}")  # used with fullmatch (a "$" anchor would accept a trailing newline)
 
 
@@ -431,6 +437,21 @@ async def reset_vm_password(
     return VMPasswordResetResponse(user=user, password=plaintext_password)
 
 
+async def _vm_running_on(agent: AgentClient, node: Node, libvirt_uuid: str) -> bool:
+    """True only if *node*'s agent reports the domain as running. Any error means False."""
+    result = await agent.send_command(node.ip_address, "vm_list", {})
+    if not result.success:
+        return False
+    try:
+        domains = json.loads(result.output)
+        return any(
+            d.get("uuid") == libvirt_uuid and d.get("state") == _LIBVIRT_STATE_RUNNING
+            for d in domains
+        )
+    except (ValueError, TypeError, AttributeError):
+        return False
+
+
 @router.post("/{vm_id}/migrate")
 async def migrate_vm(
     vm_id: uuid.UUID,
@@ -455,11 +476,20 @@ async def migrate_vm(
         src_node.ip_address,
         "vm_migrate",
         {"libvirt_uuid": vm.libvirt_uuid, "target_uri": target_uri},
+        timeout_seconds=_MIGRATE_TIMEOUT_SECONDS,
     )
     if not result.success:
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"Migration failed: {result.error}",
+        # The reply may have been lost (timeout, dropped connection) or this may
+        # be a retry of a migration that already finished; if the domain is
+        # running on the destination, the migration did happen.
+        if not await _vm_running_on(agent, dst_node, vm.libvirt_uuid):
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail=f"Migration failed: {result.error}",
+            )
+        logger.warning(
+            "Migration of VM %s reported '%s' but the domain is running on %s; recording it there",
+            vm.id, result.error, dst_node.hostname,
         )
 
     vm.node_id = dst_node.id
