@@ -324,7 +324,7 @@ class TestStopVM:
 
 
 class TestDestroyVM:
-    def test_success_cleans_disk(self, driver):
+    def test_success_cleans_disk_and_seed(self, driver):
         conn = _mock_conn()
         domain = _mock_domain()
         conn.lookupByUUIDString.return_value = domain
@@ -337,7 +337,60 @@ class TestDestroyVM:
         assert result is True
         domain.destroy.assert_called_once()
         domain.undefine.assert_called_once()
-        mock_rm.assert_called_once_with("/var/lib/cos/vms/test.qcow2")
+        removed = [c.args[0] for c in mock_rm.call_args_list]
+        assert removed == [
+            "/var/lib/cos/vms/test.qcow2",
+            "/var/lib/cos/seeds/some-uuid.iso",
+            "/var/lib/cos/seeds/some-uuid.seed.json",
+        ]
+
+    def test_removes_extra_disks_in_cos_dir_but_not_foreign_ones(self, driver, tmp_path):
+        disks = tmp_path / "vms"
+        seeds = tmp_path / "seeds"
+        disks.mkdir()
+        seeds.mkdir()
+        foreign = tmp_path / "foreign.qcow2"
+        files = {
+            "vda": disks / "u.qcow2",
+            "vdb": disks / "u-vdb.qcow2",
+            "seed": seeds / "u.iso",
+            "state": seeds / "u.seed.json",
+            "foreign": foreign,
+        }
+        for f in files.values():
+            f.write_bytes(b"x")
+        xml = f"""
+        <domain><devices>
+          <disk device='disk'><source file='{files["vda"]}'/></disk>
+          <disk device='disk'><source file='{files["vdb"]}'/></disk>
+          <disk device='disk'><source file='{foreign}'/></disk>
+          <disk device='cdrom'><source file='{files["seed"]}'/></disk>
+        </devices></domain>"""
+        conn = _mock_conn()
+        domain = _mock_domain()
+        domain.XMLDesc.return_value = xml
+        conn.lookupByUUIDString.return_value = domain
+
+        with patch("libvirt.open", return_value=conn), \
+             patch("agent.libvirt_driver._DISK_BASE_DIR", str(disks)), \
+             patch("agent.libvirt_driver._SEED_BASE_DIR", str(seeds)):
+            assert driver.destroy_vm("u") is True
+
+        assert not files["vda"].exists()
+        assert not files["vdb"].exists()
+        assert not files["seed"].exists()
+        assert not files["state"].exists()
+        assert foreign.exists()
+
+    def test_file_removal_error_does_not_fail_destroy(self, driver):
+        conn = _mock_conn()
+        domain = _mock_domain()
+        conn.lookupByUUIDString.return_value = domain
+
+        with patch("libvirt.open", return_value=conn), \
+             patch("os.path.exists", return_value=True), \
+             patch("os.remove", side_effect=PermissionError("denied")):
+            assert driver.destroy_vm("some-uuid") is True
 
     def test_error_returns_false(self, driver):
         import libvirt as _lv
@@ -2304,6 +2357,42 @@ _DOMAIN_XML_ONE_CDROM = """
 """
 
 
+_VSIZE = 21474836480  # 20 GiB
+
+
+def _migrate_fake_run(calls=None, *, stat_size=None, scp_rc=0, create_rc=0, create_timeout=False):
+    """subprocess.run stand-in for migrate_vm: qemu-img info, ssh (stat/create/rm) and scp."""
+    def fake_run(cmd, **kwargs):
+        if calls is not None:
+            calls.append(cmd)
+        if cmd[0] == "qemu-img":
+            return MagicMock(returncode=0, stdout=f'{{"virtual-size": {_VSIZE}}}', stderr="")
+        if cmd[0] == "ssh":
+            if cmd[4] == "stat":
+                if stat_size is None:
+                    return MagicMock(returncode=1, stdout="")
+                return MagicMock(returncode=0, stdout=str(stat_size))
+            if cmd[-1].startswith("if [ -e"):
+                if create_timeout:
+                    import subprocess as _sp
+                    raise _sp.TimeoutExpired(cmd, 60)
+                return MagicMock(returncode=create_rc, stderr="boom")
+            if cmd[-1].startswith("rm -f"):
+                return MagicMock(returncode=0, stderr="")
+        if cmd[0] == "scp":
+            return MagicMock(returncode=scp_rc, stderr="lost connection")
+        raise AssertionError(f"unexpected subprocess command: {cmd}")
+    return fake_run
+
+
+def _create_calls(calls):
+    return [c[-1] for c in calls if c[0] == "ssh" and c[-1].startswith("if [ -e")]
+
+
+def _rm_calls(calls):
+    return [c[-1] for c in calls if c[0] == "ssh" and c[-1].startswith("rm -f")]
+
+
 class TestMigrateVm:
     def _setup(self, domain_xml: str):
         conn = _mock_conn()
@@ -2313,85 +2402,210 @@ class TestMigrateVm:
         dest_conn = _mock_conn()
         return conn, domain, dest_conn
 
+    def _migrate(self, driver, conn, dest_conn, calls, **fake_kwargs):
+        with patch("libvirt.open", side_effect=[conn, dest_conn]), \
+             patch("subprocess.run", side_effect=_migrate_fake_run(calls, **fake_kwargs)):
+            driver.migrate_vm("some-uuid", "qemu+ssh://10.0.0.2/system")
+
     def test_no_cdrom_devices_no_scp_attempted(self, driver):
+        conn, domain, dest_conn = self._setup(_DOMAIN_XML_NO_CDROM)
+        calls = []
+
+        self._migrate(driver, conn, dest_conn, calls)
+
+        assert [c for c in calls if c[0] == "scp"] == []
+        domain.migrate.assert_called_once()
+
+    def test_precreates_sparse_disk_on_destination_before_migrate(self, driver):
+        conn, domain, dest_conn = self._setup(_DOMAIN_XML_NO_CDROM)
+        calls = []
+
+        self._migrate(driver, conn, dest_conn, calls)
+
+        (remote,) = _create_calls(calls)
+        assert f"qemu-img create -f qcow2 /var/lib/cos/vms/test.qcow2 {_VSIZE}" in remote
+        ssh_cmd = next(c for c in calls if c[0] == "ssh" and c[-1] == remote)
+        assert "10.0.0.2" in ssh_cmd and "BatchMode=yes" in ssh_cmd
+        domain.migrate.assert_called_once()
+
+    def test_precreates_every_writable_disk(self, driver):
+        xml = """
+        <domain><devices>
+          <disk device='disk'><source file='/var/lib/cos/vms/u.qcow2'/></disk>
+          <disk device='disk'><source file='/var/lib/cos/vms/u-vdb.qcow2'/></disk>
+        </devices></domain>"""
+        conn, domain, dest_conn = self._setup(xml)
+        calls = []
+
+        self._migrate(driver, conn, dest_conn, calls)
+
+        creates = _create_calls(calls)
+        assert len(creates) == 2
+        assert "/var/lib/cos/vms/u.qcow2" in creates[0]
+        assert "/var/lib/cos/vms/u-vdb.qcow2" in creates[1]
+
+    def test_existing_destination_file_refuses_migration(self, driver):
+        conn, domain, dest_conn = self._setup(_DOMAIN_XML_NO_CDROM)
+        calls = []
+
+        with patch("libvirt.open", side_effect=[conn, dest_conn]), \
+             patch("subprocess.run", side_effect=_migrate_fake_run(calls, create_rc=17)):
+            with pytest.raises(RuntimeError, match="already exists"):
+                driver.migrate_vm("some-uuid", "qemu+ssh://10.0.0.2/system")
+
+        domain.migrate.assert_not_called()
+        assert _rm_calls(calls) == []  # the pre-existing file must not be touched
+
+    def test_precreate_failure_raises(self, driver):
         conn, domain, dest_conn = self._setup(_DOMAIN_XML_NO_CDROM)
 
         with patch("libvirt.open", side_effect=[conn, dest_conn]), \
-             patch("subprocess.run") as mock_run:
-            driver.migrate_vm("some-uuid", "qemu+ssh://10.0.0.2/system")
+             patch("subprocess.run", side_effect=_migrate_fake_run(create_rc=1)):
+            with pytest.raises(RuntimeError, match="failed to create"):
+                driver.migrate_vm("some-uuid", "qemu+ssh://10.0.0.2/system")
 
-        mock_run.assert_not_called()
-        domain.migrate.assert_called_once()
+        domain.migrate.assert_not_called()
+
+    def test_precreate_timeout_raises_runtime_error(self, driver):
+        conn, domain, dest_conn = self._setup(_DOMAIN_XML_NO_CDROM)
+
+        with patch("libvirt.open", side_effect=[conn, dest_conn]), \
+             patch("subprocess.run", side_effect=_migrate_fake_run(create_timeout=True)):
+            with pytest.raises(RuntimeError, match="timed out"):
+                driver.migrate_vm("some-uuid", "qemu+ssh://10.0.0.2/system")
+
+        domain.migrate.assert_not_called()
 
     def test_cdrom_scp_success(self, driver, tmp_path):
         seed_iso = tmp_path / "test.iso"
         seed_iso.write_bytes(b"iso-bytes")
         domain_xml = _DOMAIN_XML_ONE_CDROM.replace("/var/lib/cos/seeds/test.iso", str(seed_iso))
         conn, domain, dest_conn = self._setup(domain_xml)
+        calls = []
 
-        stat_result = MagicMock(returncode=1, stdout="")  # no stat match -> fall through to scp
-        scp_result = MagicMock(returncode=0, stderr="")
+        self._migrate(driver, conn, dest_conn, calls)
 
-        def fake_run(cmd, **kwargs):
-            if cmd[0] == "ssh":
-                return stat_result
-            if cmd[0] == "scp":
-                return scp_result
-            raise AssertionError(f"unexpected subprocess command: {cmd}")
-
-        with patch("libvirt.open", side_effect=[conn, dest_conn]), \
-             patch("subprocess.run", side_effect=fake_run) as mock_run:
-            driver.migrate_vm("some-uuid", "qemu+ssh://10.0.0.2/system")
-
-        scp_calls = [c for c in mock_run.call_args_list if c.args[0][0] == "scp"]
+        scp_calls = [c for c in calls if c[0] == "scp"]
         assert len(scp_calls) == 1
-        scp_cmd = scp_calls[0].args[0]
-        assert scp_cmd[-2] == str(seed_iso)
-        assert scp_cmd[-1] == f"10.0.0.2:{seed_iso}"
+        assert scp_calls[0][-2] == str(seed_iso)
+        assert scp_calls[0][-1] == f"10.0.0.2:{seed_iso}"
         domain.migrate.assert_called_once()
 
-    def test_scp_failure_raises_before_migrate(self, driver, tmp_path):
+    def test_scp_failure_raises_before_migrate_and_cleans_destination(self, driver, tmp_path):
         seed_iso = tmp_path / "test.iso"
         seed_iso.write_bytes(b"iso-bytes")
         domain_xml = _DOMAIN_XML_ONE_CDROM.replace("/var/lib/cos/seeds/test.iso", str(seed_iso))
         conn, domain, dest_conn = self._setup(domain_xml)
-
-        stat_result = MagicMock(returncode=1, stdout="")
-        scp_result = MagicMock(returncode=1, stderr="lost connection")
-
-        def fake_run(cmd, **kwargs):
-            if cmd[0] == "ssh":
-                return stat_result
-            if cmd[0] == "scp":
-                return scp_result
-            raise AssertionError(f"unexpected subprocess command: {cmd}")
+        calls = []
 
         with patch("libvirt.open", side_effect=[conn, dest_conn]), \
-             patch("subprocess.run", side_effect=fake_run):
+             patch("subprocess.run", side_effect=_migrate_fake_run(calls, scp_rc=1)):
             with pytest.raises(RuntimeError, match="failed to copy cdrom image"):
                 driver.migrate_vm("some-uuid", "qemu+ssh://10.0.0.2/system")
 
         domain.migrate.assert_not_called()
+        (rm,) = _rm_calls(calls)
+        assert "/var/lib/cos/vms/test.qcow2" in rm  # the disk pre-created for this attempt
+        assert str(seed_iso) not in rm              # the ISO copy never happened
 
     def test_skips_copy_when_destination_already_has_matching_size(self, driver, tmp_path):
         seed_iso = tmp_path / "test.iso"
         seed_iso.write_bytes(b"iso-bytes")
         domain_xml = _DOMAIN_XML_ONE_CDROM.replace("/var/lib/cos/seeds/test.iso", str(seed_iso))
         conn, domain, dest_conn = self._setup(domain_xml)
+        calls = []
 
-        stat_result = MagicMock(returncode=0, stdout=str(seed_iso.stat().st_size))
+        self._migrate(driver, conn, dest_conn, calls, stat_size=seed_iso.stat().st_size)
 
-        def fake_run(cmd, **kwargs):
-            if cmd[0] == "ssh":
-                return stat_result
-            raise AssertionError(f"unexpected subprocess command (scp should be skipped): {cmd}")
+        assert [c for c in calls if c[0] == "scp"] == []
+        domain.migrate.assert_called_once()
+
+    def test_seed_sidecar_is_copied_when_present(self, driver, tmp_path):
+        sidecar = tmp_path / "some-uuid.seed.json"
+        sidecar.write_text("{}")
+        conn, domain, dest_conn = self._setup(_DOMAIN_XML_NO_CDROM)
+        calls = []
+
+        with patch("agent.libvirt_driver._SEED_BASE_DIR", str(tmp_path)):
+            self._migrate(driver, conn, dest_conn, calls)
+
+        scp_calls = [c for c in calls if c[0] == "scp"]
+        assert len(scp_calls) == 1
+        assert scp_calls[0][-2:] == [str(sidecar), f"10.0.0.2:{sidecar}"]
+        assert "-p" in scp_calls[0]
+
+    def test_libvirt_failure_removes_files_created_on_destination(self, driver):
+        import libvirt as _lv
+        conn, domain, dest_conn = self._setup(_DOMAIN_XML_NO_CDROM)
+        domain.migrate.side_effect = _lv.libvirtError("boom")
+        calls = []
 
         with patch("libvirt.open", side_effect=[conn, dest_conn]), \
-             patch("subprocess.run", side_effect=fake_run) as mock_run:
-            driver.migrate_vm("some-uuid", "qemu+ssh://10.0.0.2/system")
+             patch("subprocess.run", side_effect=_migrate_fake_run(calls)):
+            with pytest.raises(RuntimeError, match="boom"):
+                driver.migrate_vm("some-uuid", "qemu+ssh://10.0.0.2/system")
 
-        scp_calls = [c for c in mock_run.call_args_list if c.args[0][0] == "scp"]
-        assert scp_calls == []
+        (rm,) = _rm_calls(calls)
+        assert "/var/lib/cos/vms/test.qcow2" in rm
+
+    def test_success_removes_source_disk_and_seed_files(self, driver, tmp_path):
+        disks = tmp_path / "vms"
+        seeds = tmp_path / "seeds"
+        disks.mkdir()
+        seeds.mkdir()
+        disk = disks / "some-uuid.qcow2"
+        iso = seeds / "some-uuid.iso"
+        sidecar = seeds / "some-uuid.seed.json"
+        foreign = tmp_path / "foreign.qcow2"
+        for f in (disk, iso, sidecar, foreign):
+            f.write_bytes(b"x")
+        xml = f"""
+        <domain><devices>
+          <disk device='disk'><source file='{disk}'/></disk>
+          <disk device='disk'><source file='{foreign}'/></disk>
+          <disk device='cdrom'><source file='{iso}'/></disk>
+        </devices></domain>"""
+        conn, domain, dest_conn = self._setup(xml)
+
+        with patch("agent.libvirt_driver._DISK_BASE_DIR", str(disks)), \
+             patch("agent.libvirt_driver._SEED_BASE_DIR", str(seeds)):
+            self._migrate(driver, conn, dest_conn, [])
+
+        assert not disk.exists()
+        assert not iso.exists()
+        assert not sidecar.exists()
+        assert foreign.exists()  # outside the COS disk directory: never touched
+
+    def test_failed_migration_keeps_source_files(self, driver, tmp_path):
+        import libvirt as _lv
+        disks = tmp_path / "vms"
+        disks.mkdir()
+        disk = disks / "some-uuid.qcow2"
+        disk.write_bytes(b"x")
+        xml = f"<domain><devices><disk device='disk'><source file='{disk}'/></disk></devices></domain>"
+        conn, domain, dest_conn = self._setup(xml)
+        domain.migrate.side_effect = _lv.libvirtError("boom")
+
+        with patch("agent.libvirt_driver._DISK_BASE_DIR", str(disks)), \
+             patch("libvirt.open", side_effect=[conn, dest_conn]), \
+             patch("subprocess.run", side_effect=_migrate_fake_run()):
+            with pytest.raises(RuntimeError):
+                driver.migrate_vm("some-uuid", "qemu+ssh://10.0.0.2/system")
+
+        assert disk.exists()
+
+    def test_source_cleanup_error_does_not_fail_migration(self, driver, tmp_path):
+        disks = tmp_path / "vms"
+        disks.mkdir()
+        disk = disks / "some-uuid.qcow2"
+        disk.write_bytes(b"x")
+        xml = f"<domain><devices><disk device='disk'><source file='{disk}'/></disk></devices></domain>"
+        conn, domain, dest_conn = self._setup(xml)
+
+        with patch("agent.libvirt_driver._DISK_BASE_DIR", str(disks)), \
+             patch("os.remove", side_effect=PermissionError("denied")):
+            self._migrate(driver, conn, dest_conn, [])  # must not raise
+
         domain.migrate.assert_called_once()
 
 

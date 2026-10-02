@@ -10,6 +10,7 @@ import logging
 import os
 import queue
 import random
+import shlex
 import shutil
 import subprocess
 import tempfile
@@ -80,6 +81,131 @@ def _cdrom_source_paths(domain_xml: str) -> list[str]:
     return paths
 
 
+def _disk_source_paths(domain_xml: str) -> list[str]:
+    """Return the <source file='...'/> path of every writable disk in domain_xml."""
+    root = ET.fromstring(domain_xml)
+    paths = []
+    for source in root.findall(".//disk[@device='disk']/source"):
+        path = source.get("file")
+        if path:
+            paths.append(path)
+    return paths
+
+
+def _disk_virtual_size_bytes(path: str) -> int:
+    """Return the virtual size of the image at *path* in bytes. Raises RuntimeError on failure."""
+    try:
+        result = subprocess.run(
+            ["qemu-img", "info", "--output=json", path],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        if result.returncode == 0:
+            return int(json.loads(result.stdout)["virtual-size"])
+        detail = result.stderr.strip()
+    except (OSError, ValueError, KeyError, subprocess.TimeoutExpired) as exc:
+        detail = str(exc)
+    raise RuntimeError(f"cannot read virtual size of {path}: {detail}")
+
+
+def _is_under(path: str, base_dir: str) -> bool:
+    """True if *path* is located inside *base_dir* (lexical check, no symlink resolution)."""
+    return os.path.normpath(path).startswith(base_dir.rstrip("/") + "/")
+
+
+def _remove_local_files(paths: list[str]) -> None:
+    """Best-effort removal of local files; a missing file is fine, errors are only logged."""
+    for path in dict.fromkeys(paths):
+        try:
+            if os.path.exists(path):
+                os.remove(path)
+                logger.info("Deleted %s", path)
+        except OSError as exc:
+            logger.warning("Could not delete %s: %s", path, exc)
+
+
+_STALE_DEST_EXIT_CODE = 17
+
+
+def _precreate_disk_on_destination(path: str, size_bytes: int, dest_host: str) -> None:
+    """Create an empty, sparse qcow2 of *size_bytes* at *path* on *dest_host*.
+
+    Left to itself, libvirt pre-creates the destination disk of a
+    NON_SHARED_DISK migration fully allocated, which turns a thin disk of a few
+    GB into one that occupies its whole virtual size. When the file already
+    exists libvirt reuses it, so we create it ourselves, thin.
+
+    Refuses to proceed if the file already exists on the destination: a stale
+    file may hold old data under clusters the source never allocated. Raises
+    RuntimeError on any failure.
+    """
+    quoted = shlex.quote(path)
+    remote = (
+        f"if [ -e {quoted} ]; then exit {_STALE_DEST_EXIT_CODE}; fi; "
+        f"qemu-img create -f qcow2 {quoted} {int(size_bytes)}"
+    )
+    try:
+        result = subprocess.run(
+            ["ssh", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=accept-new", dest_host, remote],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(f"timed out creating {path} on {dest_host}") from exc
+    if result.returncode == _STALE_DEST_EXIT_CODE:
+        raise RuntimeError(
+            f"{path} already exists on {dest_host} (stale file from an earlier migration?); "
+            f"remove it there manually before migrating"
+        )
+    if result.returncode != 0:
+        raise RuntimeError(f"failed to create {path} on {dest_host}: {result.stderr.strip()}")
+    logger.info("Pre-created sparse disk %s (%d bytes) on %s", path, size_bytes, dest_host)
+
+
+def _remove_on_destination(paths: list[str], dest_host: str) -> None:
+    """Best-effort removal of files this migration created on *dest_host*."""
+    if not paths:
+        return
+    try:
+        subprocess.run(
+            ["ssh", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=accept-new", dest_host,
+             "rm -f " + " ".join(shlex.quote(p) for p in paths)],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        logger.info("Removed %d leftover file(s) from %s after failed migration", len(paths), dest_host)
+    except Exception as exc:
+        logger.warning("Could not clean up %s on %s: %s", paths, dest_host, exc)
+
+
+def _copy_seed_state_to_destination(path: str, dest_host: str) -> bool:
+    """scp the seed sidecar *path* to *dest_host* (same path). Returns True if copied.
+
+    The sidecar is only needed for add-NIC with a static IP; a missing file is
+    skipped and a failed copy is logged, never fatal.
+    """
+    if not os.path.exists(path):
+        return False
+    try:
+        result = subprocess.run(
+            ["scp", "-p", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=accept-new",
+             path, f"{dest_host}:{path}"],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+    except subprocess.TimeoutExpired:
+        logger.warning("timed out copying %s to %s", path, dest_host)
+        return False
+    if result.returncode != 0:
+        logger.warning("failed to copy %s to %s: %s", path, dest_host, result.stderr.strip())
+        return False
+    return True
+
+
 def _parse_migration_target_host(target_uri: str) -> str:
     """Extract the destination hostname/IP from a qemu+ssh://<host>/system URI."""
     host = urlparse(target_uri).hostname
@@ -88,7 +214,7 @@ def _parse_migration_target_host(target_uri: str) -> str:
     return host
 
 
-def _copy_seed_iso_to_destination(path: str, dest_host: str) -> None:
+def _copy_seed_iso_to_destination(path: str, dest_host: str) -> bool:
     """scp *path* to *dest_host* at the identical path, as the cos user.
 
     COS uses the same directory layout on every node (seed ISOs are
@@ -100,11 +226,13 @@ def _copy_seed_iso_to_destination(path: str, dest_host: str) -> None:
     Skipped if *path* doesn't exist locally (nothing to copy) or if the
     destination already has a same-sized file there (cheap idempotency,
     same pattern as fetch_template_image - not a checksum). Raises
-    RuntimeError with a clear message if the scp itself fails.
+    RuntimeError with a clear message if the scp itself fails. Returns True
+    only if the file was actually copied (so a failed migration knows what to
+    clean up on the destination).
     """
     if not os.path.exists(path):
         logger.warning("cdrom source %s not found locally, skipping copy", path)
-        return
+        return False
 
     local_size = os.path.getsize(path)
 
@@ -120,7 +248,7 @@ def _copy_seed_iso_to_destination(path: str, dest_host: str) -> None:
                 "cdrom image %s already present on %s with matching size, skipping copy",
                 path, dest_host,
             )
-            return
+            return False
     except Exception:
         pass  # best-effort idempotency check only; fall through to scp
 
@@ -135,6 +263,7 @@ def _copy_seed_iso_to_destination(path: str, dest_host: str) -> None:
             f"failed to copy cdrom image {path} to {dest_host}: {result.stderr.strip()}"
         )
     logger.info("Copied cdrom image %s to %s", path, dest_host)
+    return True
 
 
 _INTERFACE_VLAN_BLOCK = (
@@ -1120,7 +1249,7 @@ class LibvirtDriver:
             conn.close()
 
     def destroy_vm(self, libvirt_uuid: str) -> bool:
-        """Force-stop, undefine, and delete the disk of a domain."""
+        """Force-stop, undefine, and delete the disks and cloud-init seed of a domain."""
         conn = self._connect()
         try:
             domain = conn.lookupByUUIDString(libvirt_uuid)
@@ -1129,26 +1258,20 @@ class LibvirtDriver:
                 domain.destroy()
             except libvirt.libvirtError:
                 pass
-
-            disk_path: str | None = None
-            root = ET.fromstring(xml)
-            for source in root.findall(".//disk[@device='disk']/source"):
-                disk_path = source.get("file")
-                break
-
+            # First disk is always removed (as before); extra disks only when
+            # they live in the COS disk directory.
+            disk_paths = _disk_source_paths(xml)
+            to_remove = disk_paths[:1] + [p for p in disk_paths[1:] if _is_under(p, _DISK_BASE_DIR)]
+            to_remove += [p for p in _cdrom_source_paths(xml) if _is_under(p, _SEED_BASE_DIR)]
+            to_remove += [_seed_iso_path(libvirt_uuid), _seed_state_path(libvirt_uuid)]
             domain.undefine()
-
-            if disk_path and os.path.exists(disk_path):
-                os.remove(disk_path)
-                logger.info("Deleted disk %s for VM %s", disk_path, libvirt_uuid)
-
+            _remove_local_files(to_remove)
             return True
         except libvirt.libvirtError as exc:
             logger.error("destroy_vm %s failed: %s", libvirt_uuid, exc)
             return False
         finally:
             conn.close()
-
 
     def migrate_vm(self, libvirt_uuid: str, target_uri: str) -> None:
         """Live-migrate a domain to *target_uri*. Raises on failure.
@@ -1159,6 +1282,11 @@ class LibvirtDriver:
         connection as part of the live migration, rather than assuming
         shared/NFS-backed storage at the same path on both sides.
 
+        Left alone, libvirt pre-creates the destination disks fully allocated,
+        so each writable disk is first created as an empty sparse qcow2 on the
+        destination (same path and virtual size) and libvirt reuses it. If a
+        disk file already exists there the migration is refused.
+
         NON_SHARED_DISK only copies writable disks, not read-only cdrom
         devices - COS attaches the cloud-init seed ISO as exactly that, so
         any such ISO is scp'd to the destination (same path, node-local
@@ -1166,7 +1294,12 @@ class LibvirtDriver:
         migration starts, using the passwordless cos-to-cos SSH trust set up
         by scripts/setup-cluster-ssh.sh. Fails fast with a RuntimeError if
         that copy fails, rather than attempting a migration already known to
-        fail once the destination libvirt tries to open the missing ISO.
+        fail once the destination libvirt tries to open the missing ISO. The
+        seed sidecar (.seed.json) is copied along on a best-effort basis.
+
+        If anything fails, the files this call created on the destination are
+        removed. After a successful migration the now-unused disks and seed
+        files on this (source) host are deleted, best-effort.
 
         VIR_MIGRATE_UNDEFINE_SOURCE removes the domain definition from this
         (source) host once migration succeeds. Without it, PERSIST_DEST
@@ -1176,12 +1309,26 @@ class LibvirtDriver:
         correct "running" status the controller just set after migration.
         """
         conn = self._connect()
+        dest_host = ""
+        created_on_dest: list[str] = []
         try:
             domain = conn.lookupByUUIDString(libvirt_uuid)
 
             dest_host = _parse_migration_target_host(target_uri)
-            for cdrom_path in _cdrom_source_paths(domain.XMLDesc()):
-                _copy_seed_iso_to_destination(cdrom_path, dest_host)
+            xml = domain.XMLDesc()
+            disk_paths = _disk_source_paths(xml)
+            cdrom_paths = _cdrom_source_paths(xml)
+
+            for disk_path in disk_paths:
+                size_bytes = _disk_virtual_size_bytes(disk_path)
+                _precreate_disk_on_destination(disk_path, size_bytes, dest_host)
+                created_on_dest.append(disk_path)
+            for cdrom_path in cdrom_paths:
+                if _copy_seed_iso_to_destination(cdrom_path, dest_host):
+                    created_on_dest.append(cdrom_path)
+            state_path = _seed_state_path(libvirt_uuid)
+            if _copy_seed_state_to_destination(state_path, dest_host):
+                created_on_dest.append(state_path)
 
             dest_conn = libvirt.open(target_uri)
             try:
@@ -1200,9 +1347,19 @@ class LibvirtDriver:
                 dest_conn.close()
         except libvirt.libvirtError as exc:
             logger.error("migrate_vm %s to %s failed: %s", libvirt_uuid, target_uri, exc)
+            _remove_on_destination(created_on_dest, dest_host)
             raise RuntimeError(str(exc)) from exc
+        except Exception:
+            _remove_on_destination(created_on_dest, dest_host)
+            raise
         finally:
             conn.close()
+
+        # Migration succeeded: the source copies are now redundant.
+        to_remove = [p for p in disk_paths if _is_under(p, _DISK_BASE_DIR)]
+        to_remove += [p for p in cdrom_paths if _is_under(p, _SEED_BASE_DIR)]
+        to_remove += [_seed_iso_path(libvirt_uuid), state_path]
+        _remove_local_files(to_remove)
 
     def list_vms(self) -> list[dict]:
         """Return all defined domains with their uuid, name, and state."""
