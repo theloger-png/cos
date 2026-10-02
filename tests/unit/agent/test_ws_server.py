@@ -456,3 +456,50 @@ class TestVmMigrateCommand:
             )
         assert "migrate_started" in order
         assert "sibling_ran" in order
+
+
+class TestTemplateImageFetchProgress:
+    """template_image_fetch streams interim progress frames while downloading."""
+
+    @pytest.mark.asyncio
+    async def test_progress_reported_while_download_runs_then_result_returned(self):
+        import threading
+
+        from agent import ws_server
+
+        release = threading.Event()
+        libvirt = MagicMock()
+        libvirt.fetch_template_image = MagicMock(side_effect=lambda url, fn: release.wait(5) and "/images/x.img")
+        libvirt.fetch_progress = MagicMock(side_effect=[(10, 100), (60, 100)])
+        seen: list[tuple[int, int | None]] = []
+
+        async def on_progress(done, total):
+            seen.append((done, total))
+            if len(seen) == 2:
+                release.set()
+
+        cmd = AgentCommand(command="template_image_fetch", payload={"url": "https://e/x.img", "filename": "x.img"})
+        with patch("agent.ws_server._libvirt", libvirt), patch("agent.ws_server._PROGRESS_INTERVAL_SECONDS", 0.01):
+            result = await ws_server._dispatch(cmd, on_progress=on_progress)
+
+        assert seen == [(10, 100), (60, 100)]
+        assert result.success is True and result.output == "/images/x.img"
+
+    @pytest.mark.asyncio
+    async def test_download_error_still_becomes_error_result(self):
+        libvirt = MagicMock()
+        libvirt.fetch_template_image = MagicMock(side_effect=RuntimeError("disk full"))
+        libvirt.fetch_progress = MagicMock(return_value=(0, None))
+        cmd = AgentCommand(command="template_image_fetch", payload={"url": "https://e/x.img", "filename": "x.img"})
+        with patch("agent.ws_server._libvirt", libvirt):
+            result = await _dispatch(cmd)
+        assert result.success is False and "disk full" in result.error
+
+    @pytest.mark.asyncio
+    async def test_dispatch_without_callback_still_works(self):
+        libvirt = MagicMock()
+        libvirt.fetch_template_image = MagicMock(return_value="/images/x.img")
+        cmd = AgentCommand(command="template_image_fetch", payload={"url": "https://e/x.img", "filename": "x.img"})
+        with patch("agent.ws_server._libvirt", libvirt):
+            result = await _dispatch(cmd)
+        assert result.success is True

@@ -608,6 +608,23 @@ class LibvirtDriver:
     def __init__(self, uri: str = "qemu:///system", bridge: str = "nos-br") -> None:
         self._uri = uri
         self._bridge = bridge
+        # filename -> remote Content-Length of an in-flight template image
+        # download (only set when the server reported one); lets
+        # fetch_progress() turn the growing temp file into a percentage.
+        self._fetch_totals: dict[str, int] = {}
+
+    def fetch_progress(self, filename: str) -> tuple[int, int | None]:
+        """Return (bytes downloaded so far, total bytes or None) for *filename*.
+
+        Reads the size of the ".downloading" temp file that fetch_template_image
+        writes into; (0, total) before the download starts or once it is done.
+        """
+        tmp_path = os.path.join(_TEMPLATE_IMAGES_DIR, filename) + ".downloading"
+        try:
+            done = os.path.getsize(tmp_path)
+        except OSError:
+            done = 0
+        return done, self._fetch_totals.get(filename)
 
     def _connect(self) -> libvirt.virConnect:
         _ensure_libvirt_event_loop()
@@ -717,6 +734,13 @@ class LibvirtDriver:
         return None
 
     def fetch_template_image(self, url: str, filename: str) -> str:
+        """Download a template image (see _fetch_template_image); clears progress state when done."""
+        try:
+            return self._fetch_template_image(url, filename)
+        finally:
+            self._fetch_totals.pop(filename, None)
+
+    def _fetch_template_image(self, url: str, filename: str) -> str:
         """Download a template base image from *url* into
         /var/lib/libvirt/images/*filename*.
 
@@ -752,6 +776,7 @@ class LibvirtDriver:
         images_dir = _TEMPLATE_IMAGES_DIR
         dest_path = os.path.join(images_dir, filename)
         tmp_path = dest_path + ".downloading"
+        self._fetch_totals.pop(filename, None)
 
         # Cheap idempotency check: skip the download if a same-sized file is
         # already there. Best-effort only - any failure here just means we
@@ -767,6 +792,8 @@ class LibvirtDriver:
             for line in head.stdout.splitlines():
                 if line.lower().startswith("content-length:"):
                     remote_size = int(line.split(":", 1)[1].strip())
+            if remote_size is not None:
+                self._fetch_totals[filename] = remote_size
             if remote_size is not None and os.path.exists(dest_path):
                 if os.path.getsize(dest_path) == remote_size:
                     logger.info(

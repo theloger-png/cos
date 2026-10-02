@@ -1,6 +1,7 @@
 import { Outlet } from 'react-router-dom'
 import { Sidebar } from './Sidebar'
 import { TopBar } from './TopBar'
+import { OperationsConsole } from './OperationsConsole'
 
 export function Layout() {
   return (
@@ -11,6 +12,7 @@ export function Layout() {
         <main className="flex-1 overflow-auto p-6">
           <Outlet />
         </main>
+        <OperationsConsole />
       </div>
     </div>
   )

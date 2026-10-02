@@ -14,6 +14,7 @@ import asyncio
 import contextlib
 import json
 import logging
+from collections.abc import Awaitable, Callable
 
 from agent.libvirt_driver import (
     ConsoleUnavailableError,
@@ -33,8 +34,21 @@ app = FastAPI(title="COS Agent")
 _libvirt = LibvirtDriver(uri=settings.libvirt_uri, bridge=settings.vm_bridge)
 
 
-async def _dispatch(command: AgentCommand) -> AgentCommandResult:
-    """Route a command to the appropriate driver and return the result."""
+_PROGRESS_INTERVAL_SECONDS = 1.0
+
+ProgressCallback = Callable[[int, int | None], Awaitable[None]]
+
+
+async def _dispatch(
+    command: AgentCommand,
+    on_progress: ProgressCallback | None = None,
+) -> AgentCommandResult:
+    """Route a command to the appropriate driver and return the result.
+
+    *on_progress*, if given, is awaited with (bytes_done, bytes_total_or_None)
+    roughly once a second while a long-running command (template_image_fetch)
+    is in flight.
+    """
     cmd = command.command
     p = command.payload
 
@@ -60,9 +74,15 @@ async def _dispatch(command: AgentCommand) -> AgentCommandResult:
             # event loop for that long would starve heartbeats, other WS
             # connections, and console sessions on this agent for the whole
             # download duration.
-            dest_path = await asyncio.to_thread(
-                _libvirt.fetch_template_image, p["url"], p["filename"]
+            download = asyncio.create_task(
+                asyncio.to_thread(_libvirt.fetch_template_image, p["url"], p["filename"])
             )
+            while not download.done():
+                await asyncio.wait({download}, timeout=_PROGRESS_INTERVAL_SECONDS)
+                if on_progress is not None and not download.done():
+                    done, total = _libvirt.fetch_progress(p["filename"])
+                    await on_progress(done, total)
+            dest_path = download.result()  # re-raises the download's error
             return AgentCommandResult(success=True, output=dest_path)
 
         elif cmd == "vm_start":
@@ -146,7 +166,14 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
     try:
         raw = await websocket.receive_text()
         command = AgentCommand.model_validate_json(raw)
-        result = await _dispatch(command)
+
+        async def _send_progress(done: int, total: int | None) -> None:
+            # Interim frame, distinguishable from the final AgentCommandResult
+            # by its "progress" key; older controllers never request progress
+            # and ignore nothing here because only this command emits it.
+            await websocket.send_text(json.dumps({"progress": {"done": done, "total": total}}))
+
+        result = await _dispatch(command, on_progress=_send_progress)
         await websocket.send_text(result.model_dump_json())
     except WebSocketDisconnect:
         logger.debug("WebSocket client disconnected before command was received")

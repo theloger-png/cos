@@ -28,6 +28,7 @@
 - GET/POST/DELETE /api/v1/templates
 - GET/PUT /api/v1/vms/{id}/hardware (CPU/RAM/disk/NIC editing)
 - POST /api/v1/vms/{id}/reset-password (resets the guest user's password; tries live via qemu-guest-agent if the VM is running, falls back to offline via libguestfs if stopped; returns the new password once, optional body {user}, default user = template cloud_init_user or ubuntu)
+- GET /api/v1/operations: operation log for the portal console (newest first; query: limit<=500, before, status, user, action prefix). Admin callers (no tenant) see everything, tenant callers only their tenant's operations
 - (Removed 2026-09-24: /api/v1/config/* NOS passthrough endpoints)
 
 ### Scheduler
@@ -50,6 +51,13 @@
 - Commands: vm_create, vm_start, vm_stop, vm_reboot, vm_destroy, vm_migrate, vm_list, node_stats, vm_set_password (configure_vlan/remove_vlan removed 2026-09-24)
 - libvirt_driver: KVM VM lifecycle via libvirt Python bindings
 - NIC VLAN tagging handled in libvirt_driver via OVS domain XML (nos_driver removed)
+
+### Operation log (portal bottom console)
+- Every state-changing API call (POST/PUT/PATCH/DELETE, incl. endpoints added later) is recorded by an ASGI middleware (controller/api/operations_middleware.py) as a row in `operations`: user (JWT username or `api-key:<description>`), what, target, start/finish time, status running/success/failed, progress, error. Logins (success and failed) are recorded too; passwords/tokens are never stored. Unauthenticated requests, reads, node heartbeats and console tickets are not recorded
+- System events under user `system`: node offline (heartbeat monitor), node back online, VM status changes reported by heartbeats
+- Progress is real only for template image fetch (agent streams `{"progress": {"done", "total"}}` frames over the same /ws connection while curl downloads; the controller averages the per-node percentages). Everything else is indeterminate (progress NULL) until it finishes. A handler can override an HTTP-200 outcome with operations.set_outcome() (fetch-image does, when every node failed)
+- Retention 90 days (daily purge); operations left "running" by a controller restart are marked failed at start-up
+- Portal: OperationsConsole fixed at the bottom of every page, collapsible, last 5 operations visible when collapsed; expanded = resizable panel (height and open state remembered in localStorage), filters (type, user, status), click a row for details/error, "Load more" up to 500; polls every 2s
 
 ### VM Console
 - Web-based serial console for running VMs, no external viewer needed
@@ -88,7 +96,7 @@
 - See INSTALL.md for the full bare-metal-to-cluster install guide
 
 ### Database Schema (via Alembic)
-- Tables: nodes, vms, tenants, networks, vm_templates, api_keys, users, alembic_version
+- Tables: nodes, vms, tenants, networks, vm_templates, api_keys, users, operations, alembic_version
 - nos_api_key column removed from nodes (migration f6a7b8c0d1e2)
 - All migrations tracked in alembic/versions/
 
@@ -148,6 +156,7 @@
 ## Recent Changes
 
 Latest updates:
+- Operations console (2026-10-02): new `operations` table (migration b7c8d9e0f1a2), GET /api/v1/operations, recording middleware, system events and real image-download progress; portal bottom console with live 2s polling. 56 new tests (SQLite-backed middleware/API tests need aiosqlite, added to requirements-dev.txt). Not yet validated on a real controller/browser session: run scripts/cos-install.sh --role controller (applies the migration) and --role agent (needs the new agent code for progress frames; an old agent still works, the bar is just indeterminate).
 - Template images downloadable from a URL and distributed to every node from the portal (POST /api/v1/templates/{id}/fetch-image): replaces manually scp-ing image files between nodes. Agent downloads directly via curl (skips if an identically-sized file is already present), runs off the event loop via asyncio.to_thread since a large image can take several minutes; controller fans the download out to every online node concurrently and persists image_path/image_url on any success. Needed a one-time permission fix in cos-install.sh (/var/lib/libvirt/images ships root:root 711, unwritable by the unprivileged cos user). 27 new tests (agent, controller, ws_server dispatch), full suite re-verified with zero regressions.
 - Second physical node (cos-node2) onboarded, live migration infrastructure: OVS management migrated to cos-node2 matching cos-node1's topology (found and fixed a real bug in scripts/migrate-mgmt-to-ovs.sh - see Known Issues below); data NIC trunked on nos-br; VIR_MIGRATE_NON_SHARED_DISK added to migrate_vm() so migration works with per-node local storage; new scripts/setup-cluster-ssh.sh (passwordless cos-user SSH between nodes, required for qemu+ssh:// migration) and scripts/sync-template-images.sh (manual stopgap for the newly-documented gap where template images aren't synced across nodes - see TODO.md); create_vm() now fails loudly instead of silently producing a diskless VM when a template's image is missing on the node the scheduler picked.
 - Offline password reset (VM stopped, via libguestfs): cos-pw-reset-helper C binary edits only the password hash and lastchg fields of /etc/shadow directly on the disk image - no cloud-init seed rebuild, so network config/SSH keys/hostname are untouched; controller tries live reset first and falls back to offline automatically when the VM isn't running; Reset password button now active for both running and stopped VMs. Requires libguestfs-dev + a prebuilt fixed appliance (cos-install.sh builds it with supermin and sets kvm group membership for acceleration). Validated end-to-end on cos-node1 (test1 VM): helper run, VM restarted, login with the new password confirmed working.

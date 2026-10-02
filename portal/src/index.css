@@ -65,3 +65,21 @@ body {
   width: 100%;
   min-height: 100vh;
 }
+
+@keyframes operation-indeterminate {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(350%); }
+}
+
+.operation-indeterminate {
+  animation: operation-indeterminate 1.4s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .operation-indeterminate {
+    animation: none;
+    transform: none;
+    width: 100%;
+    opacity: 0.5;
+  }
+}

@@ -2,6 +2,15 @@
 
 Historical record of changes. Current state lives in STATUS.md.
 
+## Recent Changes (2026-10-02)
+
+### Operations console
+
+- Bottom console in the portal showing what is being done and what was done: time, user, operation, progress bar, status, duration; click a row for details and the full error. Collapsed bar shows the last 5 operations; expanded panel is resizable with filters and polls every 2 s.
+- Backend: `operations` table (Alembic b7c8d9e0f1a2), recording ASGI middleware for all mutating API calls and logins, GET /api/v1/operations (admin sees all, tenants only their own), 90-day retention, interrupted operations failed at start-up.
+- System events (`system` user): node offline/online, VM status changes from heartbeats.
+- Real progress for template image fetch: agent sends interim progress frames over the existing /ws connection; AgentClient.send_command takes an optional on_progress callback and stays compatible with agents that send none.
+
 ## Recent Changes (2026-10-01)
 
 ### Portal confirmations and password reset

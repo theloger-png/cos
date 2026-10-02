@@ -2368,3 +2368,40 @@ class TestMigrateVm:
         scp_calls = [c for c in mock_run.call_args_list if c.args[0][0] == "scp"]
         assert scp_calls == []
         domain.migrate.assert_called_once()
+
+
+class TestFetchProgress:
+    """LibvirtDriver.fetch_progress() reports the growing .downloading file."""
+
+    def test_reports_zero_before_download_starts(self, tmp_path):
+        driver = LibvirtDriver(uri="qemu:///system", bridge="nos-br")
+        with patch("agent.libvirt_driver._TEMPLATE_IMAGES_DIR", str(tmp_path)):
+            assert driver.fetch_progress("a.img") == (0, None)
+
+    def test_reports_temp_file_size_and_known_total(self, tmp_path):
+        driver = LibvirtDriver(uri="qemu:///system", bridge="nos-br")
+        (tmp_path / "a.img.downloading").write_bytes(b"x" * 250)
+        driver._fetch_totals["a.img"] = 1000
+        with patch("agent.libvirt_driver._TEMPLATE_IMAGES_DIR", str(tmp_path)):
+            assert driver.fetch_progress("a.img") == (250, 1000)
+
+    def test_total_is_recorded_from_head_and_cleared_when_done(self, tmp_path):
+        driver = LibvirtDriver(uri="qemu:///system", bridge="nos-br")
+        head = MagicMock()
+        head.stdout = "HTTP/1.1 200 OK\r\nContent-Length: 1000\r\n"
+        seen = {}
+
+        def fake_run(cmd, **kw):
+            if "-o" in cmd:  # the actual download
+                seen["total_during_download"] = driver._fetch_totals.get("a.img")
+                (tmp_path / "a.img.downloading").write_bytes(b"x" * 1000)
+                return MagicMock(returncode=0, stderr="")
+            return head
+
+        with patch("agent.libvirt_driver._TEMPLATE_IMAGES_DIR", str(tmp_path)), \
+             patch("subprocess.run", side_effect=fake_run), \
+             patch("shutil.chown"):
+            driver.fetch_template_image("https://example.com/a.img", "a.img")
+
+        assert seen["total_during_download"] == 1000
+        assert "a.img" not in driver._fetch_totals

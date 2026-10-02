@@ -5,6 +5,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime, timezone
 
+from controller import operations
 from common.models import HeartbeatPayload, NodeInfo, NodeStatus, VMInfo, VMStatus
 from controller.api.deps import current_auth, db_session
 from controller.db.models import APIKey, Node, Tenant, VM
@@ -166,6 +167,9 @@ async def receive_heartbeat(
     if not node:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Node not found")
 
+    came_online = node.status != NodeStatus.online.value
+    vm_transitions: list[tuple[VM, str, str]] = []
+
     node.cpu_used = body.cpu_used
     node.ram_used_mb = body.ram_used_mb
     node.disk_used_gb = body.disk_used_gb
@@ -181,8 +185,31 @@ async def receive_heartbeat(
         # otherwise keep reporting it as stopped there and clobber the
         # correct status the migrate endpoint just set on its new node.
         if vm and vm.node_id == node_id:
+            if vm.status != vm_status.value:
+                vm_transitions.append((vm, vm.status, vm_status.value))
             vm.status = vm_status.value
 
     await session.commit()
     await session.refresh(node)
+
+    # Operation-log entries for state changes the agent reported (best effort,
+    # after the commit so a logging problem can never affect the heartbeat).
+    if came_online:
+        await operations.record_system_event(
+            "node.online",
+            f"Node {node.hostname} is online",
+            target_type="node",
+            target_id=str(node.id),
+            target_name=node.hostname,
+        )
+    for vm, old_status, new_status in vm_transitions:
+        await operations.record_system_event(
+            "vm.status",
+            f"VM {vm.name} status changed: {old_status} -> {new_status}",
+            success=new_status != "error",
+            tenant_id=vm.tenant_id,
+            target_type="vm",
+            target_id=str(vm.id),
+            target_name=vm.name,
+        )
     return _node_to_info(node)
