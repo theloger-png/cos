@@ -56,7 +56,6 @@ export function VMDetail() {
   const resetPassword = useResetVMPassword()
 
   const [pendingAction, setPendingAction] = useState<PendingType | null>(null)
-  const [confirmError, setConfirmError] = useState<string | null>(null)
   const [actionError, setActionError] = useState<string | null>(null)
   const [migrateOpen, setMigrateOpen] = useState(false)
   const [targetNodeId, setTargetNodeId] = useState('')
@@ -70,34 +69,34 @@ export function VMDetail() {
   const canResetPassword = vm.status === 'running' || vm.status === 'stopped'
   const deleteNeedsForce = ['running', 'starting', 'stopping', 'paused', 'migrating'].includes(vm.status)
   const onActionError = (err: Error) => setActionError(err.message)
-  const closeConfirm = () => { setPendingAction(null); setConfirmError(null) }
-  const openConfirm = (type: PendingType) => { setConfirmError(null); setPendingAction(type) }
+  const closeConfirm = () => setPendingAction(null)
+  const openConfirm = (type: PendingType) => setPendingAction(type)
 
+  // Dialogs close as soon as the user confirms; progress and failures show up in
+  // the Operations console (the banner below only backs it up for requests that
+  // never reach the server).
   const handleConfirm = () => {
     if (!pendingAction) return
-    setConfirmError(null)
-    const onError = (err: Error) => setConfirmError(err.message)
-    if (pendingAction === 'reset-password') {
+    const action = pendingAction
+    closeConfirm()
+    setActionError(null)
+    if (action === 'reset-password') {
+      // The new password is only returned once, so show it when it arrives.
       resetPassword.mutate(vm.id, {
-        onSuccess: (data) => {
-          setCredentials({ vmName: vm.name, user: data.user, password: data.password })
-          closeConfirm()
-        },
-        onError,
+        onSuccess: (data) => setCredentials({ vmName: vm.name, user: data.user, password: data.password }),
+        onError: onActionError,
       })
-      return
+    } else if (action === 'delete') {
+      deleteVM.mutate(vm.id, { onSuccess: () => navigate('/vms'), onError: onActionError })
+    } else {
+      const mutation = { stop: stopVM, 'force-stop': forceStopVM, reboot: rebootVM }[action]
+      mutation.mutate(vm.id, { onError: onActionError })
     }
-    if (pendingAction === 'delete') {
-      deleteVM.mutate(vm.id, { onSuccess: () => navigate('/vms'), onError })
-      return
-    }
-    const mutation = { stop: stopVM, 'force-stop': forceStopVM, reboot: rebootVM }[pendingAction]
-    mutation.mutate(vm.id, { onSuccess: closeConfirm, onError })
   }
 
-  const confirmPending =
-    stopVM.isPending || forceStopVM.isPending || rebootVM.isPending ||
-    deleteVM.isPending || resetPassword.isPending
+  const actionPending =
+    startVM.isPending || stopVM.isPending || forceStopVM.isPending || rebootVM.isPending ||
+    deleteVM.isPending || resetPassword.isPending || migrateVM.isPending
 
   const confirmView = (() => {
     switch (pendingAction) {
@@ -177,13 +176,11 @@ export function VMDetail() {
 
   const handleMigrate = () => {
     if (!targetNodeId) return
-    migrateVM.mutate(
-      { id: vm.id, targetNodeId },
-      {
-        onSuccess: () => { setMigrateOpen(false); setTargetNodeId('') },
-        onError: onActionError,
-      },
-    )
+    const target = targetNodeId
+    setMigrateOpen(false)
+    setTargetNodeId('')
+    setActionError(null)
+    migrateVM.mutate({ id: vm.id, targetNodeId: target }, { onError: onActionError })
   }
 
   const onlineNodes = nodes.filter((n) => n.status === 'online' && n.id !== vm.node_id)
@@ -212,10 +209,11 @@ export function VMDetail() {
             <TerminalSquare className="h-4 w-4 mr-2" /> Console
           </Button>
 
-          <DropdownMenu>
+          {/* Non-modal: a modal menu leaves pointer-events:none on <body> when a dialog opens from an item. */}
+          <DropdownMenu modal={false}>
             <DropdownMenuTrigger asChild>
-              <Button variant="outline">
-                Actions <ChevronDown className="h-4 w-4 ml-2" />
+              <Button variant="outline" disabled={actionPending}>
+                {actionPending ? 'Working...' : 'Actions'} <ChevronDown className="h-4 w-4 ml-2" />
               </Button>
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end">
@@ -410,9 +408,7 @@ export function VMDetail() {
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setMigrateOpen(false)}>Cancel</Button>
-            <Button onClick={handleMigrate} disabled={!targetNodeId || migrateVM.isPending}>
-              {migrateVM.isPending ? 'Migrating...' : 'Migrate'}
-            </Button>
+            <Button onClick={handleMigrate} disabled={!targetNodeId}>Migrate</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
@@ -424,8 +420,6 @@ export function VMDetail() {
         confirmLabel={confirmView?.confirmLabel ?? ''}
         pendingLabel={confirmView?.pendingLabel}
         variant={confirmView?.variant}
-        isPending={confirmPending}
-        error={confirmError}
         onConfirm={handleConfirm}
         onCancel={closeConfirm}
       />

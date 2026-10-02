@@ -31,6 +31,7 @@ export function useStartVM() {
   const qc = useQueryClient()
   return useMutation({
     mutationFn: (id: string) => startVM(id),
+    onSettled: () => qc.invalidateQueries({ queryKey: ['operations'] }),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['vms'] }),
   })
 }
@@ -39,6 +40,7 @@ export function useStopVM() {
   const qc = useQueryClient()
   return useMutation({
     mutationFn: (id: string) => stopVM(id),
+    onSettled: () => qc.invalidateQueries({ queryKey: ['operations'] }),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['vms'] }),
   })
 }
@@ -47,6 +49,7 @@ export function useForceStopVM() {
   const qc = useQueryClient()
   return useMutation({
     mutationFn: (id: string) => forceStopVM(id),
+    onSettled: () => qc.invalidateQueries({ queryKey: ['operations'] }),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['vms'] }),
   })
 }
@@ -55,6 +58,7 @@ export function useRebootVM() {
   const qc = useQueryClient()
   return useMutation({
     mutationFn: (id: string) => rebootVM(id),
+    onSettled: () => qc.invalidateQueries({ queryKey: ['operations'] }),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['vms'] }),
   })
 }
@@ -63,13 +67,16 @@ export function useDeleteVM() {
   const qc = useQueryClient()
   return useMutation({
     mutationFn: (id: string) => deleteVM(id),
+    onSettled: () => qc.invalidateQueries({ queryKey: ['operations'] }),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['vms'] }),
   })
 }
 
 export function useResetVMPassword() {
+  const qc = useQueryClient()
   return useMutation<VMPasswordReset, Error, string>({
     mutationFn: (id: string) => resetVMPassword(id),
+    onSettled: () => qc.invalidateQueries({ queryKey: ['operations'] }),
   })
 }
 
@@ -78,9 +85,11 @@ export function useMigrateVM() {
   return useMutation({
     mutationFn: ({ id, targetNodeId }: { id: string; targetNodeId: string }) =>
       migrateVM(id, targetNodeId),
-    onSuccess: () => {
+    // Also on failure: the controller may have reconciled the VM's node after a lost reply.
+    onSettled: () => {
       qc.invalidateQueries({ queryKey: ['vms'] })
       qc.invalidateQueries({ queryKey: ['nodes'] })
+      qc.invalidateQueries({ queryKey: ['operations'] })
     },
   })
 }
