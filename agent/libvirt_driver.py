@@ -1127,6 +1127,13 @@ class LibvirtDriver:
         by scripts/setup-cluster-ssh.sh. Fails fast with a RuntimeError if
         that copy fails, rather than attempting a migration already known to
         fail once the destination libvirt tries to open the missing ISO.
+
+        VIR_MIGRATE_UNDEFINE_SOURCE removes the domain definition from this
+        (source) host once migration succeeds. Without it, PERSIST_DEST
+        leaves the domain defined-but-shutoff on the source as well as
+        running on the destination, so the source agent's next heartbeat
+        keeps reporting this VM's libvirt_uuid as "stopped" and clobbers the
+        correct "running" status the controller just set after migration.
         """
         conn = self._connect()
         try:
@@ -1142,7 +1149,8 @@ class LibvirtDriver:
                     dest_conn,
                     libvirt.VIR_MIGRATE_LIVE
                     | libvirt.VIR_MIGRATE_PERSIST_DEST
-                    | libvirt.VIR_MIGRATE_NON_SHARED_DISK,
+                    | libvirt.VIR_MIGRATE_NON_SHARED_DISK
+                    | libvirt.VIR_MIGRATE_UNDEFINE_SOURCE,
                     None,
                     None,
                     0,
