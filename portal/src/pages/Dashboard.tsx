@@ -1,16 +1,10 @@
 import { Server, Monitor, MemoryStick, Cpu } from 'lucide-react'
-import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { StatusBadge } from '@/components/StatusBadge'
 import { useNodes } from '@/hooks/useNodes'
 import { useVMs } from '@/hooks/useVMs'
 import { formatDate } from '@/utils/format'
-
-const mockTimelineData = Array.from({ length: 12 }, (_, i) => ({
-  time: `${String(i * 2).padStart(2, '0')}:00`,
-  nodes: Math.floor(Math.random() * 3) + 1,
-}))
 
 function StatCard({
   title,
@@ -84,30 +78,6 @@ export function Dashboard() {
           icon={Cpu}
         />
       </div>
-
-      <Card>
-        <CardHeader>
-          <CardTitle className="text-sm">Nodes Online (24h)</CardTitle>
-        </CardHeader>
-        <CardContent>
-          <ResponsiveContainer width="100%" height={200}>
-            <LineChart data={mockTimelineData}>
-              <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
-              <XAxis dataKey="time" stroke="var(--muted-foreground)" tick={{ fontSize: 11 }} />
-              <YAxis stroke="var(--muted-foreground)" tick={{ fontSize: 11 }} allowDecimals={false} />
-              <Tooltip
-                contentStyle={{
-                  background: 'var(--popover)',
-                  border: '1px solid var(--border)',
-                  borderRadius: 6,
-                  color: 'var(--popover-foreground)',
-                }}
-              />
-              <Line type="monotone" dataKey="nodes" stroke="#3b82f6" strokeWidth={2} dot={false} />
-            </LineChart>
-          </ResponsiveContainer>
-        </CardContent>
-      </Card>
 
       <Card>
         <CardHeader>

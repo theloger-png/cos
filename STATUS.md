@@ -73,7 +73,7 @@
 - ProtectedRoute: redirects to /login if no token
 - 401 interceptor: clears token and redirects to /login (except login endpoint)
 - Dark/light theme toggle, default dark, persisted to localStorage
-- Dashboard: stat cards (nodes, VMs, RAM, CPU), nodes online chart, recent VMs
+- Dashboard: stat cards (nodes, VMs, RAM, CPU), recent VMs (the former "nodes online" chart was mock random data and was removed)
 - Nodes page: table with status badges, resource bars (CPU/RAM/disk), heartbeat time
 - Node Detail: node info + VM list on that node
 - VMs page: read-only table, click a row to open the VM detail page (same tab)
