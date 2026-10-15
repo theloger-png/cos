@@ -104,6 +104,7 @@
 ## Known Limitations / Known Issues
 
 ### Limitations (By Design or Deferred)
+- Adding a DHCP NIC to a stopped VM whose seed already has an explicit network-config (a static NIC was recorded) rebuilds the seed to list the new NIC with DHCP; on a running VM nothing can be rebuilt, so that NIC stays unconfigured in the guest until the seed is rebuilt while the VM is stopped. A partial static IP (only ip_cidr or only gateway) is reported by the agent as a nic_failures entry, but the controller currently drops a partial pair before forwarding, so that report is not reachable via the API yet.
 - Static IP on add-NIC only takes effect for stopped VMs whose seed state was recorded by this version (VMs created earlier keep their seed unchanged and report a nic_failures entry); no live/hot-plug static IP.
 - Live NIC IP display and static-IP-on-add-NIC only work for VMs created after these changes (they need the guest-agent channel, qemu-guest-agent and the seed sidecar); no retrofit of older VMs, by design and not planned.
 - Guest OS support for cloud-init-based provisioning is scoped to Linux distributions with cloud-init and a Debian/RHEL-family package manager (Ubuntu, Debian, RHEL, Rocky, AlmaLinux, etc.). Windows guests are NOT supported - they require cloudbase-init or similar, not cloud-init #cloud-config.

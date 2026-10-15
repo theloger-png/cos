@@ -1343,6 +1343,7 @@ _VM_UUID = "abc-123"
 _RUNNING = 1
 _SHUTOFF = 5
 _STATIC_NIC = {"vlan_id": 101, "ip_cidr": "10.0.30.6/24", "gateway": "10.0.30.1"}
+_EXPLICIT_NIC = {"mac": "52:54:00:11:22:33", "ip_cidr": "10.0.20.5/24", "gateway": "10.0.20.1"}
 
 
 def _seed_xml(seed_path: str | None) -> str:
@@ -1404,13 +1405,102 @@ class TestApplyVmConfigStaticIp:
         assert calls == []
         assert result["nic_failures"] == []
 
-    def test_stopped_vm_with_only_ip_or_only_gateway_is_left_alone(self, tmp_path, monkeypatch):
-        _, result, calls, _ = self._run(
+    @pytest.mark.parametrize(
+        "partial, missing",
+        [({"ip_cidr": "10.0.30.6/24"}, "gateway"), ({"gateway": "10.0.30.1"}, "ip_cidr")],
+    )
+    @pytest.mark.parametrize("vm_state", [_SHUTOFF, _RUNNING])
+    def test_partial_static_ip_reports_failure_and_attaches_nothing(
+        self, tmp_path, monkeypatch, partial, missing, vm_state
+    ):
+        domain, result, calls, seeds = self._run(
+            tmp_path, monkeypatch, state=vm_state, add_nics=[{"vlan_id": 101, **partial}],
+            sidecar={"user_data": "#cloud-config\n", "nics": [_EXPLICIT_NIC]}, existing_iso=True,
+        )
+        assert calls == []
+        domain.attachDeviceFlags.assert_not_called()
+        assert (seeds / f"{_VM_UUID}.iso").read_text() == "old-iso"
+        assert len(result["nic_failures"]) == 1
+        failure = result["nic_failures"][0]
+        assert failure["target"] == "new-nic (vlan 101)"
+        assert "ip_cidr and gateway must be supplied together" in failure["reason"]
+        assert "NIC not attached" in failure["reason"]
+        assert f"got {'gateway' if missing == 'ip_cidr' else 'ip_cidr'} only" in failure["reason"]
+
+    def test_partial_nic_does_not_block_other_nics_in_same_request(self, tmp_path, monkeypatch):
+        domain, result, _, _ = self._run(
             tmp_path, monkeypatch, state=_SHUTOFF,
-            add_nics=[{"vlan_id": 101, "ip_cidr": "10.0.30.6/24"}],
+            add_nics=[{"vlan_id": 101, "ip_cidr": "10.0.30.6/24"}, {"vlan_id": 102}],
+        )
+        domain.attachDeviceFlags.assert_called_once()  # only the valid NIC
+        assert len(result["nic_failures"]) == 1
+
+    def test_dhcp_nic_added_to_vm_with_explicit_network_config_rebuilds_seed(
+        self, tmp_path, monkeypatch
+    ):
+        """An explicit network-config disables DHCP fallback, so the new NIC must be listed."""
+        recorded = {"user_data": "#cloud-config\nchpasswd: kept\n", "nics": [_EXPLICIT_NIC]}
+        domain, result, calls, seeds = self._run(
+            tmp_path, monkeypatch, state=_SHUTOFF, add_nics=[{"vlan_id": 101}],
+            sidecar=recorded, existing_iso=True,
+        )
+
+        assert result["nic_failures"] == []
+        assert len(calls) == 1
+        assert calls[0]["user_data"] == recorded["user_data"]
+        new_mac = ET.fromstring(domain.attachDeviceFlags.call_args_list[0][0][0]).find("mac").get("address")
+        cfg = calls[0]["network_config"]
+        # Existing static NIC unchanged; new NIC listed with DHCP and no address/route.
+        assert f"macaddress: '{_EXPLICIT_NIC['mac']}'" in cfg and "- 10.0.20.5/24" in cfg
+        new_block = cfg[cfg.index(f"macaddress: '{new_mac}'"):]
+        assert "dhcp4: true" in new_block
+        assert "addresses:" not in new_block and "routes:" not in new_block
+        assert (seeds / f"{_VM_UUID}.iso").read_text() == "iso"
+        # Sidecar still records the one static NIC (explicit config stays in play).
+        state = json.loads((seeds / f"{_VM_UUID}.seed.json").read_text())
+        assert state["nics"] == [_EXPLICIT_NIC]
+
+    def test_dhcp_nic_seed_rebuild_failure_is_reported(self, tmp_path, monkeypatch):
+        _, result, _, seeds = self._run(
+            tmp_path, monkeypatch, state=_SHUTOFF, add_nics=[{"vlan_id": 101}], rc=1,
+            sidecar={"user_data": "#cloud-config\n", "nics": [_EXPLICIT_NIC]}, existing_iso=True,
+        )
+        assert (seeds / f"{_VM_UUID}.iso").read_text() == "old-iso"
+        assert len(result["nic_failures"]) == 1
+        assert "will stay unconfigured" in result["nic_failures"][0]["reason"]
+        assert "cloud-localds failed" in result["nic_failures"][0]["reason"]
+
+    @pytest.mark.parametrize(
+        "sidecar, existing_iso",
+        [
+            ({"user_data": "#cloud-config\n", "nics": []}, True),  # DHCP fallback in effect
+            (None, True),  # legacy seed, no sidecar
+            (None, False),  # no seed at all
+        ],
+    )
+    def test_dhcp_nic_added_without_explicit_network_config_leaves_seed_alone(
+        self, tmp_path, monkeypatch, sidecar, existing_iso
+    ):
+        domain, result, calls, seeds = self._run(
+            tmp_path, monkeypatch, state=_SHUTOFF, add_nics=[{"vlan_id": 101}],
+            sidecar=sidecar, existing_iso=existing_iso,
         )
         assert calls == []
         assert result["nic_failures"] == []
+        domain.attachDeviceFlags.assert_called_once()  # NIC only, no seed attach
+        if existing_iso:
+            assert (seeds / f"{_VM_UUID}.iso").read_text() == "old-iso"
+        else:
+            assert not (seeds / f"{_VM_UUID}.iso").exists()
+
+    def test_dhcp_nic_added_to_running_vm_does_not_touch_seed(self, tmp_path, monkeypatch):
+        domain, result, calls, seeds = self._run(
+            tmp_path, monkeypatch, state=_RUNNING, add_nics=[{"vlan_id": 101}],
+            sidecar={"user_data": "#cloud-config\n", "nics": [_EXPLICIT_NIC]}, existing_iso=True,
+        )
+        assert calls == []
+        assert result["nic_failures"] == []
+        assert (seeds / f"{_VM_UUID}.iso").read_text() == "old-iso"
 
     def test_new_nic_attach_xml_carries_the_mac_used_in_network_config(self, tmp_path, monkeypatch):
         domain, _, calls, _ = self._run(

@@ -790,7 +790,7 @@ class LibvirtDriver:
         its default DHCP behavior.
 
         On success the seed's inputs are recorded in a JSON sidecar so the
-        seed can later be rebuilt (see _apply_static_ip_to_seed).
+        seed can later be rebuilt (see _apply_nic_to_seed).
         """
         os.makedirs(_SEED_BASE_DIR, exist_ok=True)
         seed_path = _seed_iso_path(vm_uuid)
@@ -802,20 +802,24 @@ class LibvirtDriver:
         _save_seed_state(vm_uuid, user_data, nic_configs)
         return seed_path
 
-    def _apply_static_ip_to_seed(
+    def _apply_nic_to_seed(
         self,
         domain: libvirt.virDomain,
         vm_uuid: str,
         mac: str,
-        ip_cidr: str,
-        gateway: str,
+        ip_cidr: str | None = None,
+        gateway: str | None = None,
     ) -> str | None:
-        """Rebuild a stopped domain's cloud-init seed so NIC *mac* gets a static IP.
+        """Rebuild a stopped domain's cloud-init seed so NIC *mac* is listed in its network-config.
+
+        With *ip_cidr* and *gateway* the NIC gets that static IP; without them
+        it is listed with DHCP. Listing it matters either way: once a seed
+        carries an explicit network-config, cloud-init no longer falls back to
+        DHCP for interfaces the config omits, so an unlisted NIC stays down.
 
         Returns None on success, or a human-readable failure reason. Static
         entries already recorded for other NICs are kept; every other NIC in
-        the domain is listed with DHCP, because a network-config replaces
-        cloud-init's automatic DHCP fallback for interfaces it omits. If the
+        the domain is listed with DHCP, for the same reason. If the
         domain has no seed yet, a new one with empty user-data is created and
         attached. If a seed ISO exists but its inputs were never recorded
         (created before the sidecar existed), it is left untouched because its
@@ -837,7 +841,8 @@ class LibvirtDriver:
             macs.append(mac)
 
         static = {n["mac"].lower(): n for n in state["nics"]}
-        static[mac.lower()] = {"ip_cidr": ip_cidr, "gateway": gateway}
+        if ip_cidr and gateway:
+            static[mac.lower()] = {"ip_cidr": ip_cidr, "gateway": gateway}
         nic_configs = [
             {
                 "mac": m,
@@ -1550,11 +1555,16 @@ class LibvirtDriver:
             memory_mb (int): new RAM in MiB
             add_disks (list[{size_gb}]): new secondary disks to create and attach
             add_nics (list[{vlan_id, ip_cidr?, gateway?}]): new NICs to attach on
-                *bridge*, VLAN-tagged natively by libvirt+OVS. When ip_cidr and
-                gateway are both given and the domain is shut off, its cloud-init
-                seed is rebuilt to configure the static IP on next boot; on any
-                other state the NIC is attached without it and a nic_failures
-                entry explains why.
+                *bridge*, VLAN-tagged natively by libvirt+OVS. ip_cidr and gateway
+                must be given together; supplying only one yields a nic_failures
+                entry and the NIC is not attached. When the domain is shut off
+                its cloud-init seed is rebuilt to list the new NIC: with the
+                static IP when both are given, or with DHCP when the seed already
+                carries an explicit network-config (a recorded static NIC), since
+                cloud-init would otherwise leave the unlisted NIC unconfigured.
+                Seeds with no explicit network-config need no rebuild for a DHCP
+                NIC. On any other state a requested static IP is not applied and
+                a nic_failures entry explains why.
             remove_nics (list[{mac}]): MAC addresses of existing NICs to detach
 
         Apply order:
@@ -1628,6 +1638,15 @@ class LibvirtDriver:
                 vlan_id = nic.get("vlan_id")
                 ip_cidr = nic.get("ip_cidr")
                 gateway = nic.get("gateway")
+                nic_label = f"new-nic (vlan {vlan_id})"
+                if bool(ip_cidr) != bool(gateway):
+                    reason = (
+                        "ip_cidr and gateway must be supplied together for a static IP "
+                        f"(got {'ip_cidr' if ip_cidr else 'gateway'} only); NIC not attached"
+                    )
+                    logger.warning("%s (%s)", reason, nic_label)
+                    nic_failures.append({"target": nic_label, "reason": reason})
+                    continue
                 # Explicit MAC so the guest network-config can match this NIC.
                 new_mac = _generate_mac()
                 vlan_fragment = (
@@ -1654,14 +1673,10 @@ class LibvirtDriver:
                 except libvirt.libvirtError as exc:
                     reason = str(exc)
                     logger.error("attach NIC (vlan=%s) failed: %s", vlan_id, reason)
-                    nic_failures.append({
-                        "target": f"new-nic (vlan {vlan_id})",
-                        "reason": reason,
-                    })
+                    nic_failures.append({"target": nic_label, "reason": reason})
                     continue
 
                 if ip_cidr and gateway:
-                    nic_label = f"new-nic (vlan {vlan_id})"
                     if state != libvirt.VIR_DOMAIN_SHUTOFF:
                         reason = (
                             "static IP requires the VM to be stopped - NIC attached "
@@ -1672,7 +1687,7 @@ class LibvirtDriver:
                         logger.warning("%s (%s)", reason, nic_label)
                         nic_failures.append({"target": nic_label, "reason": reason})
                     else:
-                        seed_failure = self._apply_static_ip_to_seed(
+                        seed_failure = self._apply_nic_to_seed(
                             domain, libvirt_uuid, new_mac, ip_cidr, gateway
                         )
                         if seed_failure:
@@ -1682,6 +1697,23 @@ class LibvirtDriver:
                                 "reason": (
                                     "NIC attached but static IP not configured: "
                                     f"{seed_failure}"
+                                ),
+                            })
+                elif state == libvirt.VIR_DOMAIN_SHUTOFF:
+                    # No static IP requested. If the seed already has an explicit
+                    # network-config, cloud-init will not DHCP an unlisted NIC, so
+                    # list it (as DHCP). Without one, the default fallback covers it.
+                    seed_state = _load_seed_state(libvirt_uuid)
+                    if seed_state and seed_state["nics"]:
+                        seed_failure = self._apply_nic_to_seed(domain, libvirt_uuid, new_mac)
+                        if seed_failure:
+                            logger.error("DHCP for %s failed: %s", nic_label, seed_failure)
+                            nic_failures.append({
+                                "target": nic_label,
+                                "reason": (
+                                    "NIC attached but not added to the cloud-init "
+                                    "network-config, so it will stay unconfigured in the "
+                                    f"guest: {seed_failure}"
                                 ),
                             })
 
