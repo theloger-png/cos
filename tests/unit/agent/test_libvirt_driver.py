@@ -610,7 +610,8 @@ class TestCreateVMWithCloudInit:
         cmd = mock_run.call_args[0][0]
         assert "--network-config" in cmd
 
-    def test_no_network_config_when_ip_cidr_or_gateway_missing(self, driver):
+    def test_network_config_passed_when_only_ip_cidr_given(self, driver):
+        """gateway is optional: ip_cidr alone still gets a (route-less) network-config."""
         mock_proc = MagicMock()
         mock_proc.returncode = 0
         mock_proc.stderr = ""
@@ -623,6 +624,24 @@ class TestCreateVMWithCloudInit:
                 cloud_init_user="ubuntu",
                 cloud_init_password_hash="$6$salt$hash",
                 ip_cidr="192.168.1.50/24",
+            )
+
+        cmd = mock_run.call_args[0][0]
+        assert "--network-config" in cmd
+
+    def test_no_network_config_when_only_gateway_given(self, driver):
+        mock_proc = MagicMock()
+        mock_proc.returncode = 0
+        mock_proc.stderr = ""
+
+        with patch("subprocess.run", return_value=mock_proc) as mock_run, \
+             patch("os.makedirs"), \
+             patch("builtins.open", MagicMock()):
+            self._captured_xml(
+                driver,
+                cloud_init_user="ubuntu",
+                cloud_init_password_hash="$6$salt$hash",
+                gateway="192.168.1.1",
             )
 
         cmd = mock_run.call_args[0][0]

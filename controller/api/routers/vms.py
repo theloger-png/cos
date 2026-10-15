@@ -14,7 +14,7 @@ from controller.credentials import generate_password, hash_password
 from controller.db.models import APIKey, Network, Node, Tenant, VM, VMTemplate
 from controller.scheduler.scheduler import Scheduler
 from fastapi import APIRouter, Depends, HTTPException, status
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, field_validator, model_validator
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -33,7 +33,14 @@ class VMCreate(BaseModel):
     ram_mb: int
     disk_gb: int
     ip_cidr: str | None = None  # optional static IP (e.g. "192.168.1.50/24"); DHCP if omitted
-    gateway: str | None = None  # optional static IP gateway; required alongside ip_cidr
+    gateway: str | None = None  # optional default route; needs ip_cidr, no route is added if omitted
+
+    @model_validator(mode="after")
+    def _gateway_requires_ip_cidr(self) -> "VMCreate":
+        """Reject a gateway without a static IP (a route needs an address to be meaningful)."""
+        if self.gateway and not self.ip_cidr:
+            raise ValueError("gateway requires ip_cidr")
+        return self
 
 
 class AddDiskRequest(BaseModel):
@@ -254,9 +261,10 @@ async def create_vm(
     }
     if vlan_id is not None:
         vm_create_payload["vlan_id"] = vlan_id
-    if body.ip_cidr is not None and body.gateway is not None:
+    if body.ip_cidr:
         vm_create_payload["ip_cidr"] = body.ip_cidr
-        vm_create_payload["gateway"] = body.gateway
+        if body.gateway:
+            vm_create_payload["gateway"] = body.gateway
     result = await agent.send_command(node.ip_address, "vm_create", vm_create_payload)
     if result.success:
         vm.libvirt_uuid = result.output.strip()

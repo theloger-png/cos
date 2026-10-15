@@ -142,8 +142,9 @@ class AgentCommand(BaseModel):
 
     vm_create payload keys: name, cpu_cores, ram_mb, disk_gb, image_path,
     vlan_id (optional int), ip_cidr (optional str, e.g. "192.168.1.50/24"),
-    gateway (optional str, e.g. "192.168.1.1"). ip_cidr and gateway configure
-    a static IP on the VM's single NIC via cloud-init network-config; when
+    gateway (optional str, e.g. "192.168.1.1"). ip_cidr configures a static
+    IP on the VM's single NIC via cloud-init network-config; gateway adds a
+    default route and is optional (ignored without ip_cidr). When ip_cidr is
     omitted the guest uses DHCP.
     """
 

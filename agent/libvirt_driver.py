@@ -1046,8 +1046,10 @@ class LibvirtDriver:
         seed_disk_block = ""
         if cloud_init_user and cloud_init_password_hash:
             nic_configs = []
-            if ip_cidr and gateway:
+            if ip_cidr:
                 nic_configs = [{"mac": mac_address, "ip_cidr": ip_cidr, "gateway": gateway}]
+            elif gateway:
+                logger.warning("create_vm %s: gateway given without ip_cidr, ignored (DHCP)", name)
             seed_path = self._build_cloud_init_seed(
                 vm_name=name,
                 vm_uuid=domain_uuid,

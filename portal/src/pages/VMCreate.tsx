@@ -33,6 +33,7 @@ export function VMCreate() {
   const [networkId, setNetworkId] = useState('none')
   const [ipCidr, setIpCidr] = useState('')
   const [gateway, setGateway] = useState('')
+  const [ipError, setIpError] = useState<string | null>(null)
   const [cpuCores, setCpuCores] = useState('')
   const [ramMb, setRamMb] = useState('')
   const [diskGb, setDiskGb] = useState('')
@@ -48,6 +49,11 @@ export function VMCreate() {
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault()
     if (!name || !templateId || !tenantId) return
+    if (gateway.trim() && !ipCidr.trim()) {
+      setIpError('A gateway needs a static IP: fill in Static IP (CIDR) or clear the gateway.')
+      return
+    }
+    setIpError(null)
 
     const cpu = cpuCores ? parseInt(cpuCores) : selectedTemplate?.cpu_cores ?? 1
     const ram = ramMb ? parseInt(ramMb) : selectedTemplate?.ram_mb ?? 512
@@ -63,8 +69,11 @@ export function VMCreate() {
         ram_mb: ram,
         disk_gb: disk,
         network_id: networkId === 'none' ? null : networkId,
-        ...(ipCidr.trim() && gateway.trim()
-          ? { ip_cidr: ipCidr.trim(), gateway: gateway.trim() }
+        ...(ipCidr.trim()
+          ? {
+              ip_cidr: ipCidr.trim(),
+              ...(gateway.trim() ? { gateway: gateway.trim() } : {}),
+            }
           : {}),
       },
       {
@@ -185,7 +194,7 @@ export function VMCreate() {
                     <Input
                       id="ip-cidr"
                       value={ipCidr}
-                      onChange={(e) => setIpCidr(e.target.value)}
+                      onChange={(e) => { setIpCidr(e.target.value); setIpError(null) }}
                       placeholder="10.0.20.5/24"
                     />
                   </div>
@@ -194,14 +203,15 @@ export function VMCreate() {
                     <Input
                       id="gateway"
                       value={gateway}
-                      onChange={(e) => setGateway(e.target.value)}
+                      onChange={(e) => { setGateway(e.target.value); setIpError(null) }}
                       placeholder="10.0.20.1"
                     />
                   </div>
                 </div>
                 <p className="text-xs text-[var(--muted-foreground)]">
-                  Optional. Both fields are required to set a static IP; the guest uses DHCP if left blank.
+                  Optional. Leave both blank for DHCP. Gateway is optional when an IP is given (no default route is added without it); a gateway alone is not allowed.
                 </p>
+                {ipError && <p className="text-xs text-red-400">{ipError}</p>}
               </div>
             )}
 

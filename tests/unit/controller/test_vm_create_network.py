@@ -251,3 +251,57 @@ class TestVMCreateWithNetworkId:
             await create_vm(body=body, session=session, auth=(None, None))
 
         assert captured_payload[0].get("vlan_id") == 150
+
+
+class TestCreateVmStaticIp:
+    """ip_cidr alone is valid (no default route); gateway needs ip_cidr."""
+
+    async def _create(self, **ip_kwargs) -> dict:
+        from controller.api.routers.vms import create_vm, VMCreate
+
+        tenant = _make_tenant()
+        node = _make_node()
+        session = _make_session(
+            _scalar_one_or_none(tenant),
+            _scalars_all([node]),
+            _scalar_one(node),
+        )
+        captured: list[dict] = []
+
+        async def _capture_send(ip, cmd, payload):
+            captured.append(payload)
+            return _agent_mock()
+
+        body = VMCreate(
+            name="web-03", tenant_id=tenant.id, cpu_cores=2, ram_mb=2048, disk_gb=20, **ip_kwargs
+        )
+        with patch("controller.api.routers.vms.AgentClient") as MockAgent, \
+             patch("controller.api.routers.vms.Scheduler") as MockScheduler:
+            MockAgent.return_value.send_command = AsyncMock(side_effect=_capture_send)
+            MockScheduler.return_value.select_node.return_value = node
+            await create_vm(body=body, session=session, auth=(None, None))
+        return captured[0]
+
+    @pytest.mark.asyncio
+    async def test_ip_cidr_alone_forwarded_without_gateway(self):
+        payload = await self._create(ip_cidr="10.0.30.6/24")
+        assert payload["ip_cidr"] == "10.0.30.6/24"
+        assert "gateway" not in payload
+
+    @pytest.mark.asyncio
+    async def test_ip_cidr_and_gateway_both_forwarded(self):
+        payload = await self._create(ip_cidr="10.0.30.6/24", gateway="10.0.30.1")
+        assert payload["ip_cidr"] == "10.0.30.6/24"
+        assert payload["gateway"] == "10.0.30.1"
+
+    @pytest.mark.asyncio
+    async def test_neither_forwarded_when_absent(self):
+        payload = await self._create()
+        assert "ip_cidr" not in payload and "gateway" not in payload
+
+    def test_gateway_without_ip_cidr_rejected(self):
+        from pydantic import ValidationError
+        from controller.api.routers.vms import VMCreate
+
+        with pytest.raises(ValidationError, match="gateway requires ip_cidr"):
+            VMCreate(name="x", cpu_cores=1, ram_mb=512, disk_gb=10, gateway="10.0.30.1")
