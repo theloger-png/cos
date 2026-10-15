@@ -341,12 +341,12 @@ class TestPutVmHardware:
         assert add_nic == {"vlan_id": 202, "ip_cidr": "10.0.30.6/24", "gateway": "10.0.30.1"}
 
     @pytest.mark.asyncio
-    async def test_partial_static_ip_forwarded_without_gateway(self):
+    async def test_ip_cidr_alone_forwarded_to_agent(self):
         add_nic = await self._put_add_nic({"ip_cidr": "10.0.30.6/24"})
         assert add_nic == {"vlan_id": 202, "ip_cidr": "10.0.30.6/24"}
 
     @pytest.mark.asyncio
-    async def test_partial_static_ip_forwarded_without_ip_cidr(self):
+    async def test_gateway_alone_still_forwarded_so_agent_can_reject_it(self):
         add_nic = await self._put_add_nic({"gateway": "10.0.30.1"})
         assert add_nic == {"vlan_id": 202, "gateway": "10.0.30.1"}
 
@@ -360,7 +360,7 @@ class TestPutVmHardware:
         network = _make_network(tenant, vlan_id=202)
         session = self._build_session(vm, node, network=network)
 
-        reason = "ip_cidr and gateway must be supplied together for a static IP"
+        reason = "gateway requires ip_cidr: a gateway cannot be set without a static IP address"
         agent_result = MagicMock()
         agent_result.success = True
         agent_result.output = json.dumps({
@@ -369,7 +369,7 @@ class TestPutVmHardware:
         })
 
         body = VMHardwareChanges(
-            add_nics=[AddNICRequest(network_id=network.id, ip_cidr="10.0.30.6/24")]
+            add_nics=[AddNICRequest(network_id=network.id, gateway="10.0.30.1")]
         )
         with patch("controller.api.routers.vms.AgentClient") as MockAgent:
             MockAgent.return_value.send_command = AsyncMock(return_value=agent_result)

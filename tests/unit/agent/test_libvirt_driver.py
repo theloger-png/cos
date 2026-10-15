@@ -1227,12 +1227,21 @@ class TestMakeCloudInitNetworkConfigMulti:
         assert "dhcp4: true" in cfg
         assert "addresses:" not in cfg
 
-    def test_entry_with_only_one_of_ip_or_gateway_uses_dhcp(self):
+    def test_entry_with_ip_but_no_gateway_is_static_without_route(self):
         cfg = _make_cloud_init_network_config_multi(
             [{"mac": "52:54:00:11:22:33", "ip_cidr": "10.0.0.5/24", "gateway": None}]
         )
+        assert "- 10.0.0.5/24" in cfg
+        assert "routes:" not in cfg and "via:" not in cfg
+        assert "nameservers:" not in cfg
+        assert "dhcp4" not in cfg
+
+    def test_entry_with_gateway_but_no_ip_uses_dhcp(self):
+        cfg = _make_cloud_init_network_config_multi(
+            [{"mac": "52:54:00:11:22:33", "ip_cidr": None, "gateway": "10.0.0.1"}]
+        )
         assert "dhcp4: true" in cfg
-        assert "10.0.0.5/24" not in cfg
+        assert "10.0.0.1" not in cfg
 
     def test_multiple_nics_get_unique_ids_and_macs(self):
         cfg = _make_cloud_init_network_config_multi([
@@ -1405,16 +1414,13 @@ class TestApplyVmConfigStaticIp:
         assert calls == []
         assert result["nic_failures"] == []
 
-    @pytest.mark.parametrize(
-        "partial, missing",
-        [({"ip_cidr": "10.0.30.6/24"}, "gateway"), ({"gateway": "10.0.30.1"}, "ip_cidr")],
-    )
     @pytest.mark.parametrize("vm_state", [_SHUTOFF, _RUNNING])
-    def test_partial_static_ip_reports_failure_and_attaches_nothing(
-        self, tmp_path, monkeypatch, partial, missing, vm_state
+    def test_gateway_without_ip_cidr_reports_failure_and_attaches_nothing(
+        self, tmp_path, monkeypatch, vm_state
     ):
         domain, result, calls, seeds = self._run(
-            tmp_path, monkeypatch, state=vm_state, add_nics=[{"vlan_id": 101, **partial}],
+            tmp_path, monkeypatch, state=vm_state,
+            add_nics=[{"vlan_id": 101, "gateway": "10.0.30.1"}],
             sidecar={"user_data": "#cloud-config\n", "nics": [_EXPLICIT_NIC]}, existing_iso=True,
         )
         assert calls == []
@@ -1423,14 +1429,52 @@ class TestApplyVmConfigStaticIp:
         assert len(result["nic_failures"]) == 1
         failure = result["nic_failures"][0]
         assert failure["target"] == "new-nic (vlan 101)"
-        assert "ip_cidr and gateway must be supplied together" in failure["reason"]
+        assert "gateway requires ip_cidr" in failure["reason"]
         assert "NIC not attached" in failure["reason"]
-        assert f"got {'gateway' if missing == 'ip_cidr' else 'ip_cidr'} only" in failure["reason"]
+
+    def test_ip_cidr_alone_gives_static_address_without_route(self, tmp_path, monkeypatch):
+        recorded = {"user_data": "#cloud-config\n", "nics": [_EXPLICIT_NIC]}
+        domain, result, calls, seeds = self._run(
+            tmp_path, monkeypatch, state=_SHUTOFF,
+            add_nics=[{"vlan_id": 101, "ip_cidr": "10.0.30.6/24"}],
+            sidecar=recorded, existing_iso=True,
+        )
+
+        assert result["nic_failures"] == []
+        assert len(calls) == 1
+        new_mac = ET.fromstring(domain.attachDeviceFlags.call_args_list[0][0][0]).find("mac").get("address")
+        cfg = calls[0]["network_config"]
+        new_block = cfg[cfg.index(f"macaddress: '{new_mac}'"):]
+        assert "- 10.0.30.6/24" in new_block
+        assert "routes:" not in new_block and "via:" not in new_block
+        assert "nameservers:" not in new_block and "dhcp4" not in new_block
+        # The existing NIC keeps its address and default route.
+        assert "- 10.0.20.5/24" in cfg and "via: 10.0.20.1" in cfg
+        state = json.loads((seeds / f"{_VM_UUID}.seed.json").read_text())
+        assert {n["mac"]: n["gateway"] for n in state["nics"]}[new_mac] is None
+
+    def test_ip_cidr_alone_creates_seed_when_vm_has_none(self, tmp_path, monkeypatch):
+        _, result, calls, _ = self._run(
+            tmp_path, monkeypatch, state=_SHUTOFF, xml=_seed_xml(None),
+            add_nics=[{"vlan_id": 101, "ip_cidr": "10.0.30.6/24"}],
+        )
+        assert result["nic_failures"] == []
+        assert "- 10.0.30.6/24" in calls[0]["network_config"]
+        assert "routes:" not in calls[0]["network_config"].split("eth1:")[1]
+
+    def test_ip_cidr_alone_on_running_vm_reports_static_ip_needs_stopped(self, tmp_path, monkeypatch):
+        domain, result, calls, _ = self._run(
+            tmp_path, monkeypatch, state=_RUNNING,
+            add_nics=[{"vlan_id": 101, "ip_cidr": "10.0.30.6/24"}],
+        )
+        assert calls == []
+        domain.attachDeviceFlags.assert_called_once()
+        assert "static IP requires the VM to be stopped" in result["nic_failures"][0]["reason"]
 
     def test_partial_nic_does_not_block_other_nics_in_same_request(self, tmp_path, monkeypatch):
         domain, result, _, _ = self._run(
             tmp_path, monkeypatch, state=_SHUTOFF,
-            add_nics=[{"vlan_id": 101, "ip_cidr": "10.0.30.6/24"}, {"vlan_id": 102}],
+            add_nics=[{"vlan_id": 101, "gateway": "10.0.30.1"}, {"vlan_id": 102}],
         )
         domain.attachDeviceFlags.assert_called_once()  # only the valid NIC
         assert len(result["nic_failures"]) == 1

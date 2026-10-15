@@ -371,8 +371,10 @@ def _make_cloud_init_network_config_multi(nics: list[dict]) -> str:
     """Return cloud-init network-config v2 YAML for one or more interfaces.
 
     Each entry is ``{"mac": str, "ip_cidr": str | None, "gateway": str | None}``.
-    Entries with both ip_cidr and gateway get a static address and default
-    route plus per-interface nameservers; all others get DHCP. Interfaces are matched by MAC address rather
+    Entries with an ip_cidr get a static address; if they also have a gateway
+    they get a default route plus per-interface nameservers, otherwise no
+    route (e.g. an isolated L2 segment). Entries without ip_cidr get DHCP.
+    Interfaces are matched by MAC address rather
     than name, since the guest-visible interface name (ens3, enp1s0, ...)
     varies by OS and virtio driver, while the MAC is known and fixed at
     domain-definition time.
@@ -386,23 +388,23 @@ def _make_cloud_init_network_config_multi(nics: list[dict]) -> str:
         lines += [f"    eth{idx}:", "      match:", f"        macaddress: '{nic['mac']}'"]
         ip_cidr = nic.get("ip_cidr")
         gateway = nic.get("gateway")
-        if ip_cidr and gateway:
-            lines += [
-                "      addresses:",
-                f"        - {ip_cidr}",
-                "      routes:",
-                "        - to: default",
-                f"          via: {gateway}",
-            ]
-            if idx > 0:
-                # A second default route with the same metric fails to install
-                # on Linux; keep the first NIC's route preferred.
-                lines.append(f"          metric: {1024 * (idx + 1)}")
-            lines += [
-                "      nameservers:",
-                "        addresses:",
-                *(f"          - {dns}" for dns in _STATIC_IP_NAMESERVERS),
-            ]
+        if ip_cidr:
+            lines += ["      addresses:", f"        - {ip_cidr}"]
+            if gateway:
+                lines += [
+                    "      routes:",
+                    "        - to: default",
+                    f"          via: {gateway}",
+                ]
+                if idx > 0:
+                    # A second default route with the same metric fails to install
+                    # on Linux; keep the first NIC's route preferred.
+                    lines.append(f"          metric: {1024 * (idx + 1)}")
+                lines += [
+                    "      nameservers:",
+                    "        addresses:",
+                    *(f"          - {dns}" for dns in _STATIC_IP_NAMESERVERS),
+                ]
         else:
             lines.append("      dhcp4: true")
     return "\n".join(lines) + "\n"
@@ -449,9 +451,9 @@ def _save_seed_state(vm_uuid: str, user_data: str, nic_configs: list[dict]) -> N
     tooling on the node. The file holds the password hash, so it is created 0600.
     """
     static = [
-        {"mac": n["mac"], "ip_cidr": n["ip_cidr"], "gateway": n["gateway"]}
+        {"mac": n["mac"], "ip_cidr": n["ip_cidr"], "gateway": n.get("gateway")}
         for n in nic_configs
-        if n.get("ip_cidr") and n.get("gateway")
+        if n.get("ip_cidr")
     ]
     try:
         with open(
@@ -812,8 +814,9 @@ class LibvirtDriver:
     ) -> str | None:
         """Rebuild a stopped domain's cloud-init seed so NIC *mac* is listed in its network-config.
 
-        With *ip_cidr* and *gateway* the NIC gets that static IP; without them
-        it is listed with DHCP. Listing it matters either way: once a seed
+        With *ip_cidr* the NIC gets that static IP (plus a default route when
+        *gateway* is also given, none otherwise); without *ip_cidr* it is
+        listed with DHCP. Listing it matters either way: once a seed
         carries an explicit network-config, cloud-init no longer falls back to
         DHCP for interfaces the config omits, so an unlisted NIC stays down.
 
@@ -841,7 +844,7 @@ class LibvirtDriver:
             macs.append(mac)
 
         static = {n["mac"].lower(): n for n in state["nics"]}
-        if ip_cidr and gateway:
+        if ip_cidr:
             static[mac.lower()] = {"ip_cidr": ip_cidr, "gateway": gateway}
         nic_configs = [
             {
@@ -1555,11 +1558,12 @@ class LibvirtDriver:
             memory_mb (int): new RAM in MiB
             add_disks (list[{size_gb}]): new secondary disks to create and attach
             add_nics (list[{vlan_id, ip_cidr?, gateway?}]): new NICs to attach on
-                *bridge*, VLAN-tagged natively by libvirt+OVS. ip_cidr and gateway
-                must be given together; supplying only one yields a nic_failures
-                entry and the NIC is not attached. When the domain is shut off
+                *bridge*, VLAN-tagged natively by libvirt+OVS. ip_cidr alone gives
+                a static address with no default route; adding gateway also adds
+                the route. gateway without ip_cidr yields a nic_failures entry
+                and the NIC is not attached. When the domain is shut off
                 its cloud-init seed is rebuilt to list the new NIC: with the
-                static IP when both are given, or with DHCP when the seed already
+                static IP when ip_cidr is given, or with DHCP when the seed already
                 carries an explicit network-config (a recorded static NIC), since
                 cloud-init would otherwise leave the unlisted NIC unconfigured.
                 Seeds with no explicit network-config need no rebuild for a DHCP
@@ -1641,10 +1645,10 @@ class LibvirtDriver:
                 ip_cidr = nic.get("ip_cidr")
                 gateway = nic.get("gateway")
                 nic_label = f"new-nic (vlan {vlan_id})"
-                if bool(ip_cidr) != bool(gateway):
+                if gateway and not ip_cidr:
                     reason = (
-                        "ip_cidr and gateway must be supplied together for a static IP "
-                        f"(got {'ip_cidr' if ip_cidr else 'gateway'} only); NIC not attached"
+                        "gateway requires ip_cidr: a gateway cannot be set without a "
+                        "static IP address; NIC not attached"
                     )
                     logger.warning("%s (%s)", reason, nic_label)
                     nic_failures.append({"target": nic_label, "reason": reason})
@@ -1678,7 +1682,7 @@ class LibvirtDriver:
                     nic_failures.append({"target": nic_label, "reason": reason})
                     continue
 
-                if ip_cidr and gateway:
+                if ip_cidr:
                     if state != libvirt.VIR_DOMAIN_SHUTOFF:
                         reason = (
                             "static IP requires the VM to be stopped - NIC attached "

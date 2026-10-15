@@ -47,7 +47,7 @@ class AddNICRequest(BaseModel):
 
     network_id: uuid.UUID
     ip_cidr: str | None = None  # optional static IP; applied only if the VM is stopped
-    gateway: str | None = None  # optional static IP gateway; required alongside ip_cidr
+    gateway: str | None = None  # optional default route; only meaningful with ip_cidr (agent rejects it alone)
 
 
 class RemoveNICRequest(BaseModel):
@@ -593,8 +593,9 @@ async def put_vm_hardware(
         if tenant is not None and network.tenant_id != tenant.id:
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied")
         resolved_nic: dict = {"vlan_id": network.vlan_id}
-        # Forward whatever was supplied: a partial pair (only one of the two) is
-        # reported by the agent as a nic_failures entry instead of being dropped.
+        # Forward whatever was supplied: ip_cidr alone is a valid static IP without
+        # a default route; gateway without ip_cidr is rejected by the agent as a
+        # nic_failures entry instead of being dropped here.
         if add_nic.ip_cidr:
             resolved_nic["ip_cidr"] = add_nic.ip_cidr
         if add_nic.gateway:

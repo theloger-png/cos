@@ -43,6 +43,7 @@ export function VMHardware() {
   const [newNicNetworkId, setNewNicNetworkId] = useState('none')
   const [newNicIpCidr, setNewNicIpCidr] = useState('')
   const [newNicGateway, setNewNicGateway] = useState('')
+  const [newNicError, setNewNicError] = useState<string | null>(null)
 
   // Confirmation dialog
   const [confirmOpen, setConfirmOpen] = useState(false)
@@ -90,7 +91,12 @@ export function VMHardware() {
     if (!net) return
     const ipCidr = newNicIpCidr.trim()
     const gateway = newNicGateway.trim()
-    const hasStaticIp = ipCidr !== '' && gateway !== ''
+    if (gateway !== '' && ipCidr === '') {
+      setNewNicError('A gateway needs a static IP: fill in Static IP (CIDR) or clear the gateway.')
+      return
+    }
+    setNewNicError(null)
+    const hasStaticIp = ipCidr !== ''
     setNicsToAdd((prev) => [
       ...prev,
       {
@@ -117,7 +123,9 @@ export function VMHardware() {
       add_disks: disksToAdd,
       add_nics: nicsToAdd.map((n) => ({
         network_id: n.network_id,
-        ...(n.ip_cidr && n.gateway ? { ip_cidr: n.ip_cidr, gateway: n.gateway } : {}),
+        ...(n.ip_cidr
+          ? { ip_cidr: n.ip_cidr, ...(n.gateway ? { gateway: n.gateway } : {}) }
+          : {}),
       })),
       remove_nics: nicsToRemove,
     }
@@ -337,7 +345,7 @@ export function VMHardware() {
                 <div key={i} className="flex items-center justify-between text-sm">
                   <span className="text-green-400">
                     + NIC on {n.network_name}
-                    {n.ip_cidr && ` - static IP ${n.ip_cidr} via ${n.gateway}`}
+                    {n.ip_cidr && ` - static IP ${n.ip_cidr}${n.gateway ? ` via ${n.gateway}` : ' (no default route)'}`}
                   </span>
                   <button
                     className="text-[var(--muted-foreground)] hover:text-red-400 text-xs"
@@ -390,7 +398,7 @@ export function VMHardware() {
                 <Input
                   id="nic-ip-cidr"
                   value={newNicIpCidr}
-                  onChange={(e) => setNewNicIpCidr(e.target.value)}
+                  onChange={(e) => { setNewNicIpCidr(e.target.value); setNewNicError(null) }}
                   placeholder="10.0.20.5/24"
                 />
               </div>
@@ -399,14 +407,15 @@ export function VMHardware() {
                 <Input
                   id="nic-gateway"
                   value={newNicGateway}
-                  onChange={(e) => setNewNicGateway(e.target.value)}
+                  onChange={(e) => { setNewNicGateway(e.target.value); setNewNicError(null) }}
                   placeholder="10.0.20.1"
                 />
               </div>
             </div>
             <p className="text-xs text-[var(--muted-foreground)]">
-              Optional. Both fields are required to set a static IP; the guest uses DHCP if left blank.
+              Optional. Leave both blank for DHCP. Gateway is optional when an IP is given (no default route is added without it); a gateway alone is not allowed.
             </p>
+            {newNicError && <p className="text-xs text-red-400">{newNicError}</p>}
             {vmIsRunning && (
               <p className="text-xs text-yellow-300">
                 Static IP requires the VM to be stopped - will be ignored on a running VM.
