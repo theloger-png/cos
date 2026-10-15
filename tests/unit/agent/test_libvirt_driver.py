@@ -753,6 +753,13 @@ class TestGetVmConfig:
         assert nic["mac"] == "52:54:00:11:22:33"
         assert nic["bridge"] == "nos-br"
 
+    def test_nics_have_mac_when_shut_off(self):
+        """Shut-off domain XML has no <target dev>; MAC must still identify the NIC."""
+        xml = _SAMPLE_DOMAIN_XML.replace("      <target dev='vnet0'/>\n", "")
+        nic = self._run(xml=xml)["nics"][0]
+        assert nic["target"] == ""
+        assert nic["mac"] == "52:54:00:11:22:33"
+
     def test_nic_vlan_id_from_domain_xml(self):
         """get_vm_config reads vlan_id from the interface's own <vlan><tag id='X'/> element."""
         result = self._run(xml=_SAMPLE_DOMAIN_XML_WITH_VLAN)
@@ -798,7 +805,7 @@ _SAMPLE_DOMAIN_XML_WITH_PCI = _SAMPLE_DOMAIN_XML.replace(
 class TestApplyVmConfigNicRemoval:
     """NIC removal - live detach only; OVS releases the port automatically, no reboot."""
 
-    def _run_remove(self, target="vnet0", domain_xml=_SAMPLE_DOMAIN_XML):
+    def _run_remove(self, mac="52:54:00:11:22:33", domain_xml=_SAMPLE_DOMAIN_XML):
         domain = _mock_domain_for_config(domain_xml)
         domain.state.return_value = (1, 0)  # VIR_DOMAIN_RUNNING = 1
         conn = MagicMock()
@@ -810,7 +817,7 @@ class TestApplyVmConfigNicRemoval:
              patch("subprocess.run", return_value=MagicMock(returncode=1)):
             # get_vm_config is called at the end too; avoid real libvirt there
             driver.get_vm_config = MagicMock(return_value={"vcpu": 2, "memory_mb": 2048, "disks": [], "nics": []})
-            result = driver.apply_vm_config("abc-123", {"remove_nics": [{"target": target}]})
+            result = driver.apply_vm_config("abc-123", {"remove_nics": [{"mac": mac}]})
 
         return domain, result
 
@@ -838,10 +845,36 @@ class TestApplyVmConfigNicRemoval:
         with patch("libvirt.open", return_value=conn), \
              patch("os.path.exists", return_value=True), \
              patch("subprocess.run", return_value=MagicMock(returncode=1)):
-            driver.apply_vm_config("abc-123", {"remove_nics": [{"target": "vnet0"}]})
+            driver.apply_vm_config("abc-123", {"remove_nics": [{"mac": "52:54:00:11:22:33"}]})
 
         _, flags = domain.detachDeviceFlags.call_args[0]
         assert flags == _lv.VIR_DOMAIN_AFFECT_CONFIG
+
+    def test_detach_by_mac_when_stopped_without_target(self):
+        """Stopped domain XML lacks <target dev>; removal by MAC (any case) must still work."""
+        import libvirt as _lv
+        xml = _SAMPLE_DOMAIN_XML.replace("      <target dev='vnet0'/>\n", "")
+        domain = _mock_domain_for_config(xml)
+        domain.state.return_value = (5, 0)
+        conn = MagicMock()
+        conn.lookupByUUIDString.return_value = domain
+        driver = LibvirtDriver(uri="qemu:///system", bridge="nos-br")
+        driver.get_vm_config = MagicMock(return_value={"vcpu": 2, "memory_mb": 2048, "disks": [], "nics": []})
+
+        with patch("libvirt.open", return_value=conn):
+            result = driver.apply_vm_config(
+                "abc-123", {"remove_nics": [{"mac": "52:54:00:11:22:33".upper()}]}
+            )
+
+        xml_arg, flags = domain.detachDeviceFlags.call_args[0]
+        assert "52:54:00:11:22:33" in xml_arg
+        assert flags == _lv.VIR_DOMAIN_AFFECT_CONFIG
+        assert result["nic_failures"] == []
+
+    def test_unknown_mac_reports_failure(self):
+        domain, result = self._run_remove(mac="52:54:00:ff:ff:ff")
+        domain.detachDeviceFlags.assert_not_called()
+        assert result["nic_failures"][0]["target"] == "52:54:00:ff:ff:ff"
 
     def test_no_shutdown_for_nic_only_removal(self):
         domain, _ = self._run_remove()
@@ -877,10 +910,10 @@ class TestApplyVmConfigNicRemoval:
         with patch("libvirt.open", return_value=conn), \
              patch("os.path.exists", return_value=True), \
              patch("subprocess.run", return_value=MagicMock(returncode=1)):
-            result = driver.apply_vm_config("abc-123", {"remove_nics": [{"target": "vnet0"}]})
+            result = driver.apply_vm_config("abc-123", {"remove_nics": [{"mac": "52:54:00:11:22:33"}]})
 
         assert len(result["nic_failures"]) == 1
-        assert result["nic_failures"][0]["target"] == "vnet0"
+        assert result["nic_failures"][0]["target"] == "52:54:00:11:22:33"
         assert "no device found at address" in result["nic_failures"][0]["reason"]
 
     def test_result_nic_failures_empty_on_success(self):

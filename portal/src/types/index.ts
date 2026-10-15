@@ -171,7 +171,7 @@ export interface VMHardwareChanges {
   memory_mb?: number | null
   add_disks: { size_gb: number }[]
   add_nics: { network_id: string; ip_cidr?: string; gateway?: string }[]
-  remove_nics: { target: string }[]
+  remove_nics: { mac: string }[]
 }
 
 export interface ConsoleTicketResponse {

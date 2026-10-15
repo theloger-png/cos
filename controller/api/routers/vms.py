@@ -51,9 +51,9 @@ class AddNICRequest(BaseModel):
 
 
 class RemoveNICRequest(BaseModel):
-    """An existing NIC to remove, identified by its kernel target name (e.g. vnet1)."""
+    """An existing NIC to remove, identified by its MAC address (stable whether the VM is running or stopped)."""
 
-    target: str
+    mac: str
 
 
 class VMHardwareChanges(BaseModel):

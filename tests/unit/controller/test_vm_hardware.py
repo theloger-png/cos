@@ -481,7 +481,7 @@ class TestPutVmHardware:
         agent_result.success = True
         agent_result.output = json.dumps(new_config)
 
-        body = VMHardwareChanges(remove_nics=[RemoveNICRequest(target="vnet1")])
+        body = VMHardwareChanges(remove_nics=[RemoveNICRequest(mac="52:54:00:11:22:33")])
 
         with patch("controller.api.routers.vms.AgentClient") as MockAgent:
             mock_send = AsyncMock(return_value=agent_result)
@@ -489,4 +489,4 @@ class TestPutVmHardware:
             await put_vm_hardware(vm_id=vm.id, body=body, session=session, auth=(None, None))
 
         changes = mock_send.call_args[0][2]["changes"]
-        assert changes["remove_nics"] == [{"target": "vnet1"}]
+        assert changes["remove_nics"] == [{"mac": "52:54:00:11:22:33"}]

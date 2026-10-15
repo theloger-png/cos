@@ -36,7 +36,7 @@ export function VMHardware() {
   const [nicsToAdd, setNicsToAdd] = useState<
     { network_id: string; network_name: string; ip_cidr: string; gateway: string }[]
   >([])
-  const [nicsToRemove, setNicsToRemove] = useState<{ target: string }[]>([])
+  const [nicsToRemove, setNicsToRemove] = useState<{ mac: string }[]>([])
 
   // Inline forms
   const [newDiskSizeGb, setNewDiskSizeGb] = useState('')
@@ -75,7 +75,7 @@ export function VMHardware() {
       `+NIC (${n.network_name}${n.ip_cidr ? `, static IP ${n.ip_cidr}` : ''})`,
     ),
   )
-  nicsToRemove.forEach((n) => pendingSummaryParts.push(`-NIC ${n.target}`))
+  nicsToRemove.forEach((n) => pendingSummaryParts.push(`-NIC ${n.mac}`))
 
   const handleAddDisk = () => {
     const gb = parseFloat(newDiskSizeGb)
@@ -105,10 +105,10 @@ export function VMHardware() {
     setNewNicGateway('')
   }
 
-  const handleRemoveNic = (target: string) => {
+  const handleRemoveNic = (mac: string) => {
     // Don't add duplicates
-    if (nicsToRemove.some((n) => n.target === target)) return
-    setNicsToRemove((prev) => [...prev, { target }])
+    if (nicsToRemove.some((n) => n.mac === mac)) return
+    setNicsToRemove((prev) => [...prev, { mac }])
   }
 
   const handleApply = () => {
@@ -142,8 +142,7 @@ export function VMHardware() {
   }
 
   const vmIsRunning = vms.find((v) => v.id === id)?.status === 'running'
-  const primaryNicTarget = hardware.nics[0]?.target ?? ''
-  const removingTargets = new Set(nicsToRemove.map((n) => n.target))
+  const removingMacs = new Set(nicsToRemove.map((n) => n.mac))
 
   return (
     <div className="space-y-6 max-w-3xl">
@@ -296,11 +295,10 @@ export function VMHardware() {
             </TableHeader>
             <TableBody>
               {hardware.nics.map((nic) => {
-                const isPrimary = nic.target === primaryNicTarget
-                const pendingRemoval = removingTargets.has(nic.target)
+                const pendingRemoval = removingMacs.has(nic.mac)
                 return (
-                  <TableRow key={nic.target} className={pendingRemoval ? 'opacity-40 line-through' : ''}>
-                    <TableCell className="font-mono text-sm">{nic.target}</TableCell>
+                  <TableRow key={nic.mac} className={pendingRemoval ? 'opacity-40 line-through' : ''}>
+                    <TableCell className="font-mono text-sm">{nic.target || "—"}</TableCell>
                     <TableCell className="text-sm">
                       {nic.network_name
                         ? nic.network_name
@@ -319,9 +317,8 @@ export function VMHardware() {
                         <Button
                           variant="ghost"
                           size="icon"
-                          title={isPrimary ? 'Primary NIC cannot be removed' : 'Remove NIC'}
-                          disabled={isPrimary}
-                          onClick={() => handleRemoveNic(nic.target)}
+                          title="Remove NIC"
+                          onClick={() => handleRemoveNic(nic.mac)}
                         >
                           <Trash2 className="h-3.5 w-3.5 text-red-400" />
                         </Button>
@@ -352,7 +349,7 @@ export function VMHardware() {
               ))}
               {nicsToRemove.map((n, i) => (
                 <div key={i} className="flex items-center justify-between text-sm">
-                  <span className="text-red-400">− remove {n.target}</span>
+                  <span className="text-red-400">− remove {n.mac}</span>
                   <button
                     className="text-[var(--muted-foreground)] hover:text-red-400 text-xs"
                     onClick={() => setNicsToRemove((prev) => prev.filter((_, j) => j !== i))}

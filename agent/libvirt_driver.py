@@ -1406,7 +1406,10 @@ class LibvirtDriver:
         """Return the current hardware configuration of a domain as a plain dict.
 
         Shape: {vcpu, memory_mb, disks: [{target, size_gb, path, device}],
-                nics: [{target, mac, bridge, vlan_id, ip_addresses}]}
+                nics: [{mac, target, bridge, vlan_id, ip_addresses}]}
+
+        A NIC's MAC is its stable identifier; ``target`` (vnetX) exists only in
+        the live XML and is "" while the domain is shut off.
 
         Each NIC's vlan_id is read directly from its own <vlan><tag id='X'/></vlan>
         element in the domain XML, applied natively by libvirt+OVS.
@@ -1552,7 +1555,7 @@ class LibvirtDriver:
                 seed is rebuilt to configure the static IP on next boot; on any
                 other state the NIC is attached without it and a nic_failures
                 entry explains why.
-            remove_nics (list[{target}]): existing NIC target names to detach
+            remove_nics (list[{mac}]): MAC addresses of existing NICs to detach
 
         Apply order:
         1. NIC removals (live detach; OVS releases the port automatically) - no reboot
@@ -1576,27 +1579,26 @@ class LibvirtDriver:
 
             # ── Step 1: NIC removals ──────────────────────────────────────
             for nic in remove_nics:
-                target_name = nic.get("target", "")
-                if not target_name:
+                mac_address = (nic.get("mac") or "").strip()
+                if not mac_address:
                     continue
 
-                # Extract MAC from live XML to build a minimal detach fragment.
+                # Verify the NIC exists in the domain XML (persistent or live);
+                # MAC is stable whether the domain is running or shut off.
                 xml_str = domain.XMLDesc(0)
                 root = ET.fromstring(xml_str)
-                mac_address: str | None = None
+                found = False
                 for iface_elem in root.findall(".//interface"):
-                    t = iface_elem.find("target")
-                    if t is None or t.get("dev") != target_name:
-                        continue
                     mac_elem = iface_elem.find("mac")
-                    if mac_elem is not None:
-                        mac_address = mac_elem.get("address", "")
-                    break
+                    if mac_elem is not None and mac_elem.get("address", "").lower() == mac_address.lower():
+                        mac_address = mac_elem.get("address", mac_address)
+                        found = True
+                        break
 
-                if mac_address is None:
-                    reason = f"NIC {target_name} not found in domain XML"
+                if not found:
+                    reason = f"NIC {mac_address} not found in domain XML"
                     logger.warning(reason)
-                    nic_failures.append({"target": target_name, "reason": reason})
+                    nic_failures.append({"target": mac_address, "reason": reason})
                     continue
 
                 # Minimal XML avoids <address>/<alias> PCI mismatch on detach.
@@ -1618,8 +1620,8 @@ class LibvirtDriver:
                     domain.detachDeviceFlags(detach_xml, flags)
                 except libvirt.libvirtError as exc:
                     reason = str(exc)
-                    logger.warning("detach NIC %s failed: %s", target_name, reason)
-                    nic_failures.append({"target": target_name, "reason": reason})
+                    logger.warning("detach NIC %s failed: %s", mac_address, reason)
+                    nic_failures.append({"target": mac_address, "reason": reason})
 
             # ── Step 2: NIC additions ─────────────────────────────────────
             for nic in add_nics:
