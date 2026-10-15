@@ -593,8 +593,11 @@ async def put_vm_hardware(
         if tenant is not None and network.tenant_id != tenant.id:
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied")
         resolved_nic: dict = {"vlan_id": network.vlan_id}
-        if add_nic.ip_cidr and add_nic.gateway:
+        # Forward whatever was supplied: a partial pair (only one of the two) is
+        # reported by the agent as a nic_failures entry instead of being dropped.
+        if add_nic.ip_cidr:
             resolved_nic["ip_cidr"] = add_nic.ip_cidr
+        if add_nic.gateway:
             resolved_nic["gateway"] = add_nic.gateway
         resolved_add_nics.append(resolved_nic)
 

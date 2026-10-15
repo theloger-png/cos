@@ -341,14 +341,45 @@ class TestPutVmHardware:
         assert add_nic == {"vlan_id": 202, "ip_cidr": "10.0.30.6/24", "gateway": "10.0.30.1"}
 
     @pytest.mark.asyncio
-    async def test_static_ip_omitted_without_gateway(self):
+    async def test_partial_static_ip_forwarded_without_gateway(self):
         add_nic = await self._put_add_nic({"ip_cidr": "10.0.30.6/24"})
-        assert add_nic == {"vlan_id": 202}
+        assert add_nic == {"vlan_id": 202, "ip_cidr": "10.0.30.6/24"}
 
     @pytest.mark.asyncio
-    async def test_static_ip_omitted_without_ip_cidr(self):
+    async def test_partial_static_ip_forwarded_without_ip_cidr(self):
         add_nic = await self._put_add_nic({"gateway": "10.0.30.1"})
-        assert add_nic == {"vlan_id": 202}
+        assert add_nic == {"vlan_id": 202, "gateway": "10.0.30.1"}
+
+    @pytest.mark.asyncio
+    async def test_agent_nic_failures_returned_in_response(self):
+        from controller.api.routers.vms import put_vm_hardware, VMHardwareChanges, AddNICRequest
+
+        tenant = _make_tenant()
+        node = _make_node()
+        vm = _make_vm(tenant, node)
+        network = _make_network(tenant, vlan_id=202)
+        session = self._build_session(vm, node, network=network)
+
+        reason = "ip_cidr and gateway must be supplied together for a static IP"
+        agent_result = MagicMock()
+        agent_result.success = True
+        agent_result.output = json.dumps({
+            **_hardware_dict(vlan_id=202),
+            "nic_failures": [{"target": "new-nic (vlan 202)", "reason": reason}],
+        })
+
+        body = VMHardwareChanges(
+            add_nics=[AddNICRequest(network_id=network.id, ip_cidr="10.0.30.6/24")]
+        )
+        with patch("controller.api.routers.vms.AgentClient") as MockAgent:
+            MockAgent.return_value.send_command = AsyncMock(return_value=agent_result)
+            response = await put_vm_hardware(
+                vm_id=vm.id, body=body, session=session, auth=(None, None)
+            )
+
+        assert len(response.nic_failures) == 1
+        assert response.nic_failures[0].target == "new-nic (vlan 202)"
+        assert reason in response.nic_failures[0].reason
 
     @pytest.mark.asyncio
     async def test_nic_ip_addresses_flow_through_to_response(self):

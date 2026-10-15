@@ -1563,8 +1563,10 @@ class LibvirtDriver:
                 carries an explicit network-config (a recorded static NIC), since
                 cloud-init would otherwise leave the unlisted NIC unconfigured.
                 Seeds with no explicit network-config need no rebuild for a DHCP
-                NIC. On any other state a requested static IP is not applied and
-                a nic_failures entry explains why.
+                NIC. On a VM that is not stopped the seed cannot be rebuilt, so
+                a requested static IP, or a DHCP NIC on a seed with an explicit
+                network-config, is left unconfigured and a nic_failures entry
+                explains why.
             remove_nics (list[{mac}]): MAC addresses of existing NICs to detach
 
         Apply order:
@@ -1699,12 +1701,25 @@ class LibvirtDriver:
                                     f"{seed_failure}"
                                 ),
                             })
-                elif state == libvirt.VIR_DOMAIN_SHUTOFF:
+                else:
                     # No static IP requested. If the seed already has an explicit
                     # network-config, cloud-init will not DHCP an unlisted NIC, so
-                    # list it (as DHCP). Without one, the default fallback covers it.
+                    # it must be listed (as DHCP). Without one, the default
+                    # fallback covers the NIC and the seed is left alone.
                     seed_state = _load_seed_state(libvirt_uuid)
-                    if seed_state and seed_state["nics"]:
+                    has_explicit_config = bool(seed_state and seed_state["nics"])
+                    if has_explicit_config and state != libvirt.VIR_DOMAIN_SHUTOFF:
+                        reason = (
+                            "NIC attached but has no network configuration: the VM is "
+                            "not stopped, so its cloud-init seed (which has an explicit "
+                            "network-config that omits this NIC) cannot be rebuilt live. "
+                            "The NIC stays unconfigured in the guest (no DHCP, no static "
+                            "IP) until it is configured manually, or the VM is stopped "
+                            "and a NIC change is applied to rebuild the seed"
+                        )
+                        logger.warning("%s (%s)", reason, nic_label)
+                        nic_failures.append({"target": nic_label, "reason": reason})
+                    elif has_explicit_config:
                         seed_failure = self._apply_nic_to_seed(domain, libvirt_uuid, new_mac)
                         if seed_failure:
                             logger.error("DHCP for %s failed: %s", nic_label, seed_failure)

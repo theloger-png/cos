@@ -1493,14 +1493,34 @@ class TestApplyVmConfigStaticIp:
         else:
             assert not (seeds / f"{_VM_UUID}.iso").exists()
 
-    def test_dhcp_nic_added_to_running_vm_does_not_touch_seed(self, tmp_path, monkeypatch):
+    def test_dhcp_nic_added_to_running_vm_with_explicit_network_config_reports_failure(
+        self, tmp_path, monkeypatch
+    ):
+        """Seed cannot be rebuilt live, so the NIC stays unconfigured: say so."""
         domain, result, calls, seeds = self._run(
             tmp_path, monkeypatch, state=_RUNNING, add_nics=[{"vlan_id": 101}],
             sidecar={"user_data": "#cloud-config\n", "nics": [_EXPLICIT_NIC]}, existing_iso=True,
         )
+        assert calls == []  # no rebuild attempted
+        assert (seeds / f"{_VM_UUID}.iso").read_text() == "old-iso"
+        domain.attachDeviceFlags.assert_called_once()  # NIC itself still attached
+        assert len(result["nic_failures"]) == 1
+        failure = result["nic_failures"][0]
+        assert failure["target"] == "new-nic (vlan 101)"
+        assert "NIC attached but has no network configuration" in failure["reason"]
+        assert "cannot be rebuilt live" in failure["reason"]
+        assert "no DHCP, no static IP" in failure["reason"]
+
+    def test_dhcp_nic_added_to_running_vm_without_explicit_network_config_has_no_failure(
+        self, tmp_path, monkeypatch
+    ):
+        """Default DHCP fallback still covers the NIC, so there is nothing to report."""
+        _, result, calls, _ = self._run(
+            tmp_path, monkeypatch, state=_RUNNING, add_nics=[{"vlan_id": 101}],
+            sidecar={"user_data": "#cloud-config\n", "nics": []}, existing_iso=True,
+        )
         assert calls == []
         assert result["nic_failures"] == []
-        assert (seeds / f"{_VM_UUID}.iso").read_text() == "old-iso"
 
     def test_new_nic_attach_xml_carries_the_mac_used_in_network_config(self, tmp_path, monkeypatch):
         domain, _, calls, _ = self._run(
